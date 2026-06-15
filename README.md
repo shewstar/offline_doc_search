@@ -25,8 +25,14 @@ See [offline-pdf-search-plan.md](offline-pdf-search-plan.md) for the full design
   folder picker (`/api/browse`) lets you browse to a folder instead of typing a
   path.
 
+- **Phase 4 (cont.)** — offline packaging: a PyInstaller onedir build produces a
+  self-contained, network-free bundle (no Python install needed on the target).
+  Read-only UI assets are bundled; the writable index lives in a `data/` folder
+  beside the executable. The launcher starts the localhost server and opens the
+  browser. See [PACKAGING.md](PACKAGING.md).
+
 OCR requires `ocrmypdf` + `tesseract` on PATH (optional). Remaining Phase 4 work:
-bundled PDF.js viewer, settings export/import, and offline packaging.
+settings export/import.
 
 ## Setup
 
@@ -84,4 +90,8 @@ python -m app.cli search '"SA-2024-0093"'        # exact reference code
 | `app/search.py` | FTS5 MATCH, BM25 ranking, snippets, filters |
 | `app/cli.py` | Command-line interface |
 | `app/main.py` | FastAPI app: web UI + JSON API + PDF serving |
+| `app/paths.py` | Frozen-aware resource/data dirs (source vs PyInstaller build) |
+| `app/launcher.py` | Packaged entry point: starts server, opens browser |
+| `run_app.py` | Top-level entry script (PyInstaller target) |
 | `web/index.html` | Single-file frontend (search, filters, viewer) |
+| `packaging/` | PyInstaller spec + build script (see [PACKAGING.md](PACKAGING.md)) |

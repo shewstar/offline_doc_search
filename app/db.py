@@ -11,9 +11,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-# Project root = parent of the app/ package.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "app.db"
+from . import paths
+
+# Project root for source runs; the writable data dir is frozen-aware (it lands
+# beside the executable in a packaged build). See app/paths.py.
+PROJECT_ROOT = paths.resource_root()
+DEFAULT_DB_PATH = paths.data_root() / "app.db"
 
 # FTS5 tokenizer: exact matching (no stemming) so reference numbers / codes
 # survive; diacritics folded; 2- and 3-char prefix indexes for fast `term*`.

@@ -1,0 +1,5 @@
+# Build-time only — packaging the app into a frozen offline bundle.
+# Install on the (online) build machine alongside requirements.txt:
+#     pip install -r requirements.txt -r requirements-build.txt
+# Not needed at runtime on the target machine.
+pyinstaller>=6.3

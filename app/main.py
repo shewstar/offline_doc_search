@@ -20,9 +20,9 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, indexer, ocr, search
+from . import db, indexer, ocr, paths, search
 
-WEB_DIR = db.PROJECT_ROOT / "web"
+WEB_DIR = paths.WEB_DIR
 
 # ES modules must be served as JavaScript or browsers refuse to execute them;
 # Python's mimetypes doesn't know .mjs on all platforms (notably Windows).

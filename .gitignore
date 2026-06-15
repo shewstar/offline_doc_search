@@ -7,5 +7,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# PyInstaller build output
+/build/
+/dist/
+*.manifest
+# Wheelhouse for air-gapped installs
+/wheelhouse/
 # Claude Code local settings (machine-specific permissions)
 .claude/settings.local.json

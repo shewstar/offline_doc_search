@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import db, extractor, ocr
+from . import db, extractor, ocr, paths
 
-DEFAULT_OCR_CACHE = db.PROJECT_ROOT / "data" / "ocr-cache"
+DEFAULT_OCR_CACHE = paths.data_root() / "ocr-cache"
 
 
 @dataclass
