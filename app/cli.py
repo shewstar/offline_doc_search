@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import db, indexer, search
+from . import db, indexer, ocr, search
 
 
 def _cmd_index(args) -> int:
@@ -20,14 +20,20 @@ def _cmd_index(args) -> int:
     if not root.is_dir():
         print(f"error: not a folder: {root}", file=sys.stderr)
         return 2
+    ocr_config = indexer.OcrConfig(enabled=args.ocr, language=args.ocr_lang)
+    if args.ocr and not ocr.ocr_available():
+        print("warning: --ocr requested but ocrmypdf/tesseract not found on PATH; "
+              "scanned files will be flagged 'required' but left un-OCR'd.",
+              file=sys.stderr)
     conn = db.connect(args.db)
     db.init_schema(conn)
     t0 = time.perf_counter()
-    stats = indexer.index_folder(conn, root)
+    stats = indexer.index_folder(conn, root, ocr_config=ocr_config)
     dt = time.perf_counter() - t0
     print(f"{stats.summary()}  ({dt:.2f}s)")
     if stats.scanned_pdfs:
-        print(f"  {len(stats.scanned_pdfs)} file(s) look scanned (OCR pending, Phase 2):")
+        label = "OCR pending" if not args.ocr else "still un-OCR'd"
+        print(f"  {len(stats.scanned_pdfs)} file(s) look scanned ({label}):")
         for p in stats.scanned_pdfs[:10]:
             print(f"    - {p}")
     return 0
@@ -70,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_index = sub.add_parser("index", help="index a folder of PDFs")
     p_index.add_argument("folder")
+    p_index.add_argument("--ocr", action="store_true",
+                         help="OCR scanned PDFs via ocrmypdf (slower)")
+    p_index.add_argument("--ocr-lang", default="eng",
+                         help="Tesseract language(s), e.g. 'eng' or 'eng+deu'")
     p_index.set_defaults(func=_cmd_index)
 
     p_search = sub.add_parser("search", help="search the index (FTS5 syntax)")
