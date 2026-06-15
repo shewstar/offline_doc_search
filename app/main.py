@@ -165,6 +165,7 @@ def _index_worker(job_id: str, folder: Path, cfg: indexer.OcrConfig) -> None:
             skipped=p.stats.skipped,
             deleted=p.stats.deleted,
             failed=p.stats.failed,
+            encrypted=p.stats.encrypted,
             ocr_done=p.stats.ocr_done,
             ocr_failed=p.stats.ocr_failed,
             ocr_unavailable=p.stats.ocr_unavailable,
@@ -204,7 +205,8 @@ def api_index(req: IndexRequest) -> dict:
         _jobs[job_id] = {"state": "running", "phase": "starting", "error": None,
                          "ocr_warning": ocr_warning, "total_files": 0,
                          "total_pages": 0, "files_done": 0, "pages_done": 0,
-                         "current_file": "", "elapsed_s": 0, "eta_s": None}
+                         "current_file": "", "elapsed_s": 0, "eta_s": None,
+                         "failed": 0, "encrypted": 0}
     cfg = indexer.OcrConfig(enabled=req.ocr, language=req.ocr_lang)
     threading.Thread(target=_index_worker, args=(job_id, root, cfg),
                      daemon=True).start()
@@ -239,6 +241,68 @@ def api_file(id: int) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=410, detail="file no longer on disk")
     return FileResponse(path, media_type="application/pdf", filename=row["filename"])
+
+
+@app.get("/api/browse")
+def api_browse(path: str = "") -> dict:
+    """List subfolders for the folder picker.
+
+    This app is single-user and localhost-bound, so browsing the local
+    filesystem is the intended behaviour. Empty path lists drive roots (Windows)
+    or `/` (POSIX).
+    """
+    import os
+    import string
+
+    if not path:
+        if os.name == "nt":
+            roots = [f"{d}:\\" for d in string.ascii_uppercase
+                     if Path(f"{d}:\\").exists()]
+            return {"path": "", "parent": None,
+                    "dirs": [{"name": r, "path": r} for r in roots], "pdf_count": 0}
+        path = "/"
+
+    p = Path(path)
+    if not p.is_dir():
+        raise HTTPException(status_code=404, detail="not a directory")
+    p = p.resolve()
+
+    try:
+        subdirs = sorted(
+            (e for e in p.iterdir() if e.is_dir() and not e.name.startswith(".")),
+            key=lambda e: e.name.lower(),
+        )
+        dirs = [{"name": e.name, "path": str(e)} for e in subdirs]
+    except (PermissionError, OSError):
+        dirs = []
+
+    try:
+        pdf_count = sum(1 for _ in p.glob("*.pdf"))
+    except (PermissionError, OSError):
+        pdf_count = 0
+
+    # At a filesystem/drive root, "up" goes to the roots listing ("").
+    parent = "" if p.parent == p else str(p.parent)
+    return {"path": str(p), "parent": parent, "dirs": dirs, "pdf_count": pdf_count}
+
+
+@app.get("/api/issues")
+def api_issues(limit: int = Query(50, ge=1, le=500)) -> dict:
+    """Recent problem events (failed / encrypted / ocr_failed) for visibility."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """SELECT ts, path, event, detail FROM index_events
+               WHERE event IN ('failed','encrypted','ocr_failed')
+               ORDER BY ts DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return {"issues": [
+            {"ts": r["ts"], "path": r["path"], "event": r["event"],
+             "detail": r["detail"]} for r in rows
+        ]}
+    finally:
+        conn.close()
 
 
 def main() -> None:

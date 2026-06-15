@@ -18,8 +18,15 @@ See [offline-pdf-search-plan.md](offline-pdf-search-plan.md) for the full design
   nested). Indexing runs as a background job with a live progress bar and a
   page-weighted ETA (polled via `/api/index/status`).
 
-OCR requires `ocrmypdf` + `tesseract` on PATH (optional). Phase 4 hardening
-(bundled PDF.js viewer, async index progress, packaging) is not done yet.
+- **Phase 4 (in progress)** — robustness for messy corpora: encrypted PDFs are
+  detected (after trying the empty password), recorded as `encrypted`, and not
+  retried each run; corrupted/locked files fail without aborting the batch.
+  Problem files are surfaced via `/api/issues` and an "issues" link in the UI. A
+  folder picker (`/api/browse`) lets you browse to a folder instead of typing a
+  path.
+
+OCR requires `ocrmypdf` + `tesseract` on PATH (optional). Remaining Phase 4 work:
+bundled PDF.js viewer, settings export/import, and offline packaging.
 
 ## Setup
 

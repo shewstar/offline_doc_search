@@ -77,6 +77,32 @@
   .progress .ptext { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .progress .pcur { font-size: 12px; color: var(--ink); max-width: 240px;
                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .issueslink { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .overlay { position: fixed; inset: 0; background: rgba(20,26,38,.45);
+             display: none; align-items: center; justify-content: center; z-index: 50; }
+  .overlay.on { display: flex; }
+  .modal { background: var(--panel); border-radius: 12px; width: 560px;
+           max-width: 92vw; max-height: 80vh; display: flex; flex-direction: column;
+           box-shadow: 0 12px 40px rgba(0,0,0,.3); overflow: hidden; }
+  .modal h2 { font-size: 14px; margin: 0; padding: 14px 16px;
+              border-bottom: 1px solid var(--line); }
+  .modal .path { padding: 8px 16px; font-size: 12px; color: var(--muted);
+                 background: #f6f8fb; border-bottom: 1px solid var(--line);
+                 word-break: break-all; }
+  .dirlist { overflow-y: auto; flex: 1; min-height: 180px; }
+  .direntry { padding: 9px 16px; cursor: pointer; display: flex; gap: 8px;
+              align-items: center; border-bottom: 1px solid #f0f2f5; }
+  .direntry:hover { background: #eef3ff; }
+  .direntry .ic { color: var(--muted); }
+  .modal .foot { padding: 12px 16px; display: flex; gap: 8px; align-items: center;
+                 border-top: 1px solid var(--line); }
+  .modal .foot .note { color: var(--muted); font-size: 12px; margin-right: auto; }
+  .issue { padding: 9px 16px; border-bottom: 1px solid #f0f2f5; font-size: 12px; }
+  .issue .ev { font-weight: 600; }
+  .issue .ev.encrypted { color: var(--badge-ocr); }
+  .issue .ev.failed, .issue .ev.ocr_failed { color: #b91c1c; }
+  .issue .p { color: var(--ink); word-break: break-all; }
+  .issue .d { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -85,10 +111,11 @@
   <span class="stats" id="stats">…</span>
   <div class="index-bar">
     <input type="text" id="folder" placeholder="folder to index…" size="22">
+    <button id="browseBtn">Browse…</button>
     <label style="font-size:12px;color:var(--muted)">
       <input type="checkbox" id="ocr"> OCR
     </label>
-    <button id="indexBtn">Index</button>
+    <button id="indexBtn" class="primary">Index</button>
   </div>
 </header>
 
@@ -128,6 +155,30 @@
     <iframe id="viewer" style="display:none"></iframe>
   </div>
 </main>
+
+<div class="overlay" id="browseOverlay">
+  <div class="modal">
+    <h2>Choose a folder to index</h2>
+    <div class="path" id="browsePath">…</div>
+    <div class="dirlist" id="dirlist"></div>
+    <div class="foot">
+      <span class="note" id="browseNote"></span>
+      <button id="browseCancel">Cancel</button>
+      <button class="primary" id="browseUse">Use this folder</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="issuesOverlay">
+  <div class="modal">
+    <h2>Indexing issues</h2>
+    <div class="dirlist" id="issueslist"></div>
+    <div class="foot">
+      <span class="note">Encrypted, corrupted, or OCR-failed files.</span>
+      <button class="primary" id="issuesClose">Close</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -283,6 +334,16 @@ async function pollStatus(jobId, btnOld) {
     if (j.ocr_done) msg += ` · ${j.ocr_done} OCR'd`;
     if (j.ocr_warning) msg += ` · ⚠ ${j.ocr_warning}`;
     $("meta").textContent = msg;
+    const problems = (j.failed || 0) + (j.encrypted || 0);
+    if (problems) {
+      const link = document.createElement("span");
+      link.className = "issueslink";
+      link.style.marginLeft = "8px";
+      link.textContent = `⚠ ${problems} issue${problems === 1 ? "" : "s"} — view`;
+      link.onclick = openIssues;
+      $("meta").appendChild(document.createTextNode(" "));
+      $("meta").appendChild(link);
+    }
   }
   await refreshStats();
   runSearch();
@@ -322,11 +383,88 @@ async function doIndex() {
   }
 }
 
+// ---- Folder picker ----
+let browseCurrent = "";
+
+async function browseTo(path) {
+  let data;
+  try {
+    data = await (await fetch("/api/browse?path=" + encodeURIComponent(path))).json();
+  } catch { return; }
+  browseCurrent = data.path;
+  $("browsePath").textContent = data.path || "This PC (drives)";
+  $("browseNote").textContent = data.path
+    ? `${data.pdf_count} PDF${data.pdf_count === 1 ? "" : "s"} directly in this folder`
+    : "Pick a drive to start";
+  $("browseUse").disabled = !data.path;
+  const list = $("dirlist");
+  list.innerHTML = "";
+  if (data.parent !== null) {
+    const up = document.createElement("div");
+    up.className = "direntry";
+    up.innerHTML = `<span class="ic">↰</span><span>.. (up)</span>`;
+    up.onclick = () => browseTo(data.parent);
+    list.appendChild(up);
+  }
+  for (const d of data.dirs) {
+    const row = document.createElement("div");
+    row.className = "direntry";
+    row.innerHTML = `<span class="ic">📁</span><span class="nm"></span>`;
+    row.querySelector(".nm").textContent = d.name;
+    row.onclick = () => browseTo(d.path);
+    list.appendChild(row);
+  }
+  if (!data.dirs.length && data.parent !== null) {
+    const none = document.createElement("div");
+    none.className = "direntry"; none.style.color = "var(--muted)";
+    none.textContent = "(no subfolders)";
+    list.appendChild(none);
+  }
+}
+
+function openBrowse() {
+  $("browseOverlay").classList.add("on");
+  browseTo($("folder").value.trim());
+}
+function closeBrowse() { $("browseOverlay").classList.remove("on"); }
+
+// ---- Issues ----
+async function openIssues() {
+  $("issuesOverlay").classList.add("on");
+  const list = $("issueslist");
+  list.innerHTML = '<div class="issue">Loading…</div>';
+  let data;
+  try { data = await (await fetch("/api/issues")).json(); }
+  catch { list.innerHTML = '<div class="issue">Could not load issues.</div>'; return; }
+  if (!data.issues.length) {
+    list.innerHTML = '<div class="issue">No recorded issues.</div>'; return;
+  }
+  list.innerHTML = "";
+  for (const it of data.issues) {
+    const el = document.createElement("div");
+    el.className = "issue";
+    el.innerHTML = `<span class="ev ${it.event}">${it.event}</span> ` +
+                   `<span class="p"></span>` +
+                   (it.detail ? `<div class="d"></div>` : "");
+    el.querySelector(".p").textContent = it.path || "";
+    if (it.detail) el.querySelector(".d").textContent = it.detail;
+    list.appendChild(el);
+  }
+}
+function closeIssues() { $("issuesOverlay").classList.remove("on"); }
+
 $("q").addEventListener("input", debounce(runSearch, 200));
 $("fFolder").addEventListener("input", debounce(runSearch, 200));
 $("fMethod").addEventListener("change", runSearch);
 $("indexBtn").addEventListener("click", doIndex);
 $("folder").addEventListener("keydown", (e) => { if (e.key === "Enter") doIndex(); });
+$("browseBtn").addEventListener("click", openBrowse);
+$("browseCancel").addEventListener("click", closeBrowse);
+$("browseUse").addEventListener("click", () => { $("folder").value = browseCurrent; closeBrowse(); });
+$("issuesClose").addEventListener("click", closeIssues);
+for (const id of ["browseOverlay", "issuesOverlay"]) {
+  $(id).addEventListener("click", (e) => { if (e.target.id === id) e.target.classList.remove("on"); });
+}
 refreshStats();
 </script>
 </body>

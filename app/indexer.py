@@ -31,6 +31,7 @@ class IndexStats:
     skipped: int = 0
     deleted: int = 0
     failed: int = 0
+    encrypted: int = 0
     ocr_done: int = 0
     ocr_failed: int = 0
     ocr_unavailable: int = 0
@@ -39,6 +40,7 @@ class IndexStats:
     def summary(self) -> str:
         return (f"indexed={self.indexed} skipped={self.skipped} "
                 f"deleted={self.deleted} failed={self.failed} "
+                f"encrypted={self.encrypted} "
                 f"scanned_detected={len(self.scanned_pdfs)} "
                 f"ocr_done={self.ocr_done} ocr_failed={self.ocr_failed} "
                 f"ocr_unavailable={self.ocr_unavailable}")
@@ -143,7 +145,13 @@ def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
                 _index_one(conn, pdf, stat, digest, stats, ocr_config)
                 stats.indexed += 1
                 db.log_event(conn, "indexed", path_str)
-        except Exception as exc:  # noqa: BLE001 - keep the batch going
+        except extractor.EncryptedPDF:
+            # Stable failure: record a tracked, page-less row so it shows up as
+            # encrypted and isn't re-attempted on every reindex.
+            _record_unindexable(conn, pdf, stat, digest, "encrypted")
+            stats.encrypted += 1
+            db.log_event(conn, "encrypted", path_str)
+        except Exception as exc:  # noqa: BLE001 - transient; retried next index
             stats.failed += 1
             db.log_event(conn, "failed", path_str, f"{type(exc).__name__}: {exc}")
         conn.commit()
@@ -164,6 +172,23 @@ def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
     progress.current_file = ""
     emit()
     return stats
+
+
+def _record_unindexable(conn, pdf: Path, stat, digest: str, status: str) -> None:
+    """Insert a page-less document row for a file we can't index (e.g. encrypted).
+
+    Tracking it (with hash + mtime) means the fast-skip path won't keep retrying
+    it, while it stays visible in stats/queries.
+    """
+    conn.execute("DELETE FROM documents WHERE path=?", (str(pdf),))
+    conn.execute(
+        """INSERT INTO documents
+           (path, filename, folder, file_hash, size_bytes, modified_at,
+            page_count, ocr_status, last_indexed_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (str(pdf), pdf.name, str(pdf.parent), digest, stat.st_size,
+         stat.st_mtime, 0, status, time.time()),
+    )
 
 
 def _index_one(conn, pdf: Path, stat, digest: str, stats: IndexStats,

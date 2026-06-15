@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import fitz  # PyMuPDF
+
+
+class EncryptedPDF(Exception):
+    """A PDF that needs a password we don't have — a stable, expected failure."""
 
 
 @dataclass
@@ -47,9 +52,19 @@ def page_count(pdf_path: str) -> int:
 
 
 def extract_pages(pdf_path: str) -> list[PageText]:
-    """Extract normalized text for every page. Raises on unreadable PDFs."""
+    """Extract normalized text for every page.
+
+    Raises EncryptedPDF if the file is password-protected (after trying the empty
+    password, which unlocks many "encrypted" PDFs that only restrict printing).
+    Raises other exceptions on corrupt/unreadable PDFs — callers treat those as
+    transient failures and retry on the next index.
+    """
     pages: list[PageText] = []
     with fitz.open(pdf_path) as doc:
+        if doc.needs_pass:
+            # Empty password is the common case for "owner-locked" PDFs.
+            if not doc.authenticate(""):
+                raise EncryptedPDF(Path(pdf_path).name)
         for i, page in enumerate(doc, start=1):
             raw = page.get_text("text") or ""
             text = normalize(raw)
