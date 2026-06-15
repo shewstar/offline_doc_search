@@ -1,0 +1,9 @@
+# Generated data / index
+/data/
+# Local test PDFs
+/test-corpus/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
