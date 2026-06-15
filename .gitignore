@@ -13,5 +13,7 @@ venv/
 *.manifest
 # Wheelhouse for air-gapped installs
 /wheelhouse/
+# Optional local LLM models (user drop-in GGUF files)
+/models/
 # Claude Code local settings (machine-specific permissions)
 .claude/settings.local.json

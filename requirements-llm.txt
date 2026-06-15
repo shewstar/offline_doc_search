@@ -1,0 +1,5 @@
+# Optional — natural-language Ask mode (local GGUF model in models/).
+# Not required for keyword search. Install only when enabling Ask:
+#     pip install -r requirements-llm.txt
+# Drop a *.gguf instruct model into models/ beside the executable.
+llama-cpp-python>=0.3.0

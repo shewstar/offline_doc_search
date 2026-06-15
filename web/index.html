@@ -107,6 +107,20 @@
   .issue .ev.failed, .issue .ev.ocr_failed { color: #b91c1c; }
   .issue .p { color: var(--ink); word-break: break-all; }
   .issue .d { color: var(--muted); }
+  .mode-toggle { display: flex; gap: 4px; margin-bottom: 8px; }
+  .mode-toggle button { flex: 1; font-size: 12px; padding: 6px 10px; }
+  .mode-toggle button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .ask-row { display: flex; gap: 8px; }
+  .ask-row input { flex: 1; }
+  .answer-card { margin: 12px 16px; padding: 12px 14px; background: #f0f6ff;
+                 border: 1px solid #c7d9f5; border-radius: 8px; font-size: 13px;
+                 line-height: 1.55; }
+  .answer-card .disclaimer { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .answer-card .cite { color: var(--accent); cursor: pointer; text-decoration: underline;
+                       font-weight: 500; }
+  .answer-card .cite:hover { color: #1d4ed8; }
+  .setup-hint { padding: 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+  .setup-hint code { font-size: 12px; background: #eef1f5; padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -133,7 +147,19 @@
 <main>
   <div class="left">
     <div class="searchrow">
-      <input type="text" id="q" placeholder="Search…  (use &quot;exact phrase&quot;, term*, AND/OR/NOT)" autofocus>
+      <div class="mode-toggle">
+        <button type="button" id="modeSearch" class="active">Search</button>
+        <button type="button" id="modeAsk">Ask</button>
+      </div>
+      <div id="searchInput">
+        <input type="text" id="q" placeholder="Search…  (use &quot;exact phrase&quot;, term*, AND/OR/NOT)" autofocus>
+      </div>
+      <div id="askInput" style="display:none">
+        <div class="ask-row">
+          <input type="text" id="askQ" placeholder="Ask a question about your documents…">
+          <button type="button" id="askBtn" class="primary">Ask</button>
+        </div>
+      </div>
       <div class="filters">
         <span>filters:</span>
         <input type="text" id="fFolder" placeholder="folder contains…" size="16">
@@ -188,6 +214,9 @@
 const $ = (id) => document.getElementById(id);
 let activeEl = null;
 let viewerDocId = null;  // which document the PDF.js iframe currently has loaded
+let mode = "search";     // "search" | "ask"
+let askSourceMap = {};   // "filename|page" -> { document_id, filename, folder, page_number }
+let askPollTimer = null;
 
 async function refreshStats() {
   try {
@@ -202,29 +231,13 @@ function debounce(fn, ms) {
   let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
-async function runSearch() {
-  const q = $("q").value.trim();
-  const params = new URLSearchParams({ q });
-  if ($("fFolder").value.trim()) params.set("folder", $("fFolder").value.trim());
-  if ($("fMethod").value) params.set("method", $("fMethod").value);
-  if (!q) {
-    $("results").innerHTML = '<div class="empty">Type to search your indexed PDFs.</div>';
-    $("meta").textContent = ""; return;
-  }
-  const res = await fetch("/api/search?" + params.toString());
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    $("meta").textContent = e.detail || "query error";
-    $("results").innerHTML = ""; return;
-  }
-  const data = await res.json();
-  $("meta").textContent =
-    `${data.doc_count} document(s) · ${data.page_count} page hit(s) · ${data.took_ms} ms`;
-  if (!data.documents.length) {
-    $("results").innerHTML = '<div class="empty">No matches.</div>'; return;
+function renderDocuments(documents, emptyMsg) {
+  if (!documents.length) {
+    $("results").innerHTML = `<div class="empty">${emptyMsg}</div>`;
+    return;
   }
   $("results").innerHTML = "";
-  for (const doc of data.documents) {
+  for (const doc of documents) {
     const group = document.createElement("div");
     group.className = "docgroup collapsed";
 
@@ -247,16 +260,257 @@ async function runSearch() {
       const row = document.createElement("div");
       row.className = "pagehit";
       row.innerHTML = `<span class="pg">p.${pg.page_number}</span>` +
-                      `<span class="snip">${pg.snippet_html}</span>`;
+                      `<span class="snip">${pg.snippet_html || ""}</span>`;
       row.onclick = () => openPage(doc, pg.page_number, row);
       pagelist.appendChild(row);
     }
     group.appendChild(pagelist);
-
-    // Clicking the header (filename or caret) expands/collapses this
-    // document's hit list; clicking an individual page opens it.
     head.onclick = () => group.classList.toggle("collapsed");
     $("results").appendChild(group);
+  }
+}
+
+function sourcesToDocuments(sources) {
+  const groups = {};
+  const order = [];
+  for (const s of sources) {
+    let g = groups[s.document_id];
+    if (!g) {
+      g = {
+        document_id: s.document_id,
+        filename: s.filename,
+        folder: s.folder,
+        method: "native",
+        matched_pages: 0,
+        pages: [],
+      };
+      groups[s.document_id] = g;
+      order.push(s.document_id);
+    }
+    g.matched_pages += 1;
+    g.pages.push({
+      page_number: s.page_number,
+      method: "native",
+      snippet_html: "",
+      count: s.count,
+    });
+    askSourceMap[`${s.filename.toLowerCase()}|${s.page_number}`] = s;
+  }
+  return order.map((id) => groups[id]);
+}
+
+function renderAnswer(text, isCount) {
+  const card = document.createElement("div");
+  card.className = "answer-card";
+  const disclaimer = document.createElement("div");
+  disclaimer.className = "disclaimer";
+  disclaimer.textContent = isCount
+    ? "Exact count across your indexed PDFs — click sources to verify."
+    : "Generated locally — verify in source PDFs.";
+  card.appendChild(disclaimer);
+
+  const body = document.createElement("div");
+  const citeRe = /\[([^\]]+?)\s+p\.(\d+)\]/gi;
+  let last = 0;
+  let m;
+  while ((m = citeRe.exec(text))) {
+    if (m.index > last) body.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const span = document.createElement("span");
+    span.className = "cite";
+    span.textContent = m[0];
+    const fname = m[1].trim().toLowerCase();
+    const page = parseInt(m[2], 10);
+    span.onclick = () => {
+      const key = `${fname}|${page}`;
+      let src = askSourceMap[key];
+      if (!src) {
+        for (const [k, v] of Object.entries(askSourceMap)) {
+          const [kf] = k.split("|");
+          if (k.endsWith(`|${page}`) && (kf.includes(fname) || fname.includes(kf))) {
+            src = v; break;
+          }
+        }
+      }
+      if (src) {
+        const doc = { document_id: src.document_id, filename: src.filename, folder: src.folder };
+        openPage(doc, page, null, []);
+      }
+    };
+    body.appendChild(span);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) body.appendChild(document.createTextNode(text.slice(last)));
+  card.appendChild(body);
+  return card;
+}
+
+async function runSearch() {
+  const q = $("q").value.trim();
+  const params = new URLSearchParams({ q });
+  if ($("fFolder").value.trim()) params.set("folder", $("fFolder").value.trim());
+  if ($("fMethod").value) params.set("method", $("fMethod").value);
+  if (!q) {
+    $("results").innerHTML = '<div class="empty">Type to search your indexed PDFs.</div>';
+    $("meta").textContent = ""; return;
+  }
+  const res = await fetch("/api/search?" + params.toString());
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    $("meta").textContent = e.detail || "query error";
+    $("results").innerHTML = ""; return;
+  }
+  const data = await res.json();
+  $("meta").textContent =
+    `${data.doc_count} document(s) · ${data.page_count} page hit(s) · ${data.took_ms} ms`;
+  renderDocuments(data.documents, "No matches.");
+}
+
+async function checkAskAvailable() {
+  try {
+    return await (await fetch("/api/ask/status")).json();
+  } catch { return { available: false }; }
+}
+
+function showAskSetup(st) {
+  const dir = st.models_dir || "models/";
+  let msg = '<div class="setup-hint">';
+  if (!st.llama_installed) {
+    msg += "<strong>Ask mode needs llama-cpp-python.</strong><br>" +
+           "Install with: <code>pip install -r requirements-llm.txt</code><br><br>";
+  }
+  msg += "<strong>No local model found.</strong><br>" +
+         `Drop a GGUF instruct model into <code>${dir}</code> ` +
+         "(e.g. Qwen2.5-1.5B-Instruct Q4_K_M). See PACKAGING.md.";
+  msg += "</div>";
+  $("results").innerHTML = msg;
+  $("meta").textContent = "";
+}
+
+function renderAskSources(docs) {
+  for (const doc of docs) {
+    const group = document.createElement("div");
+    group.className = "docgroup collapsed";
+    const head = document.createElement("div");
+    head.className = "dochead";
+    const matchLabel = doc.matched_pages === 1 ? "1 page" : `${doc.matched_pages} pages`;
+    head.innerHTML =
+      `<span class="caret">▾</span><span class="fn"></span>` +
+      `<span class="badge native">source</span>` +
+      `<span class="cnt">${matchLabel}</span><span class="folder"></span>`;
+    head.querySelector(".fn").textContent = doc.filename;
+    head.querySelector(".folder").textContent = doc.folder;
+    group.appendChild(head);
+    const pagelist = document.createElement("div");
+    pagelist.className = "pagelist";
+    for (const pg of doc.pages) {
+      const row = document.createElement("div");
+      row.className = "pagehit";
+      const label = pg.count != null ? `p.${pg.page_number} · ${pg.count}×` : `p.${pg.page_number}`;
+      row.innerHTML = `<span class="pg">${label}</span>`;
+      row.onclick = () => openPage(doc, pg.page_number, row, []);
+      pagelist.appendChild(row);
+    }
+    group.appendChild(pagelist);
+    head.onclick = () => group.classList.toggle("collapsed");
+    $("results").appendChild(group);
+  }
+}
+
+async function pollAsk(jobId) {
+  let j;
+  try {
+    const res = await fetch("/api/ask/status?job_id=" + jobId);
+    if (!res.ok) throw new Error("status " + res.status);
+    j = await res.json();
+  } catch {
+    $("meta").textContent = "lost contact with ask job";
+    $("askBtn").disabled = false;
+    return;
+  }
+  if (j.state === "running") {
+    askPollTimer = setTimeout(() => pollAsk(jobId), 600);
+    return;
+  }
+  $("askBtn").disabled = false;
+  if (j.state === "error") {
+    $("meta").textContent = "ask error: " + (j.error || "unknown");
+    $("results").innerHTML = '<div class="empty">Could not generate an answer.</div>';
+    return;
+  }
+  $("meta").textContent =
+    `${j.sources.length} source page(s) · ${j.took_ms} ms` +
+    (j.search_queries?.length ? ` · queries: ${j.search_queries.join(", ")}` : "");
+
+  askSourceMap = {};
+  const docs = sourcesToDocuments(j.sources);
+  const isCount = j.search_queries?.[0]?.startsWith("count:");
+  $("results").innerHTML = "";
+  $("results").appendChild(renderAnswer(j.answer, isCount));
+  if (docs.length) {
+    const hdr = document.createElement("div");
+    hdr.className = "meta";
+    hdr.style.cssText = "border-top:1px solid var(--line);margin-top:4px";
+    hdr.textContent = "Sources";
+    $("results").appendChild(hdr);
+    renderAskSources(docs);
+  }
+}
+
+async function runAsk() {
+  const question = $("askQ").value.trim();
+  if (!question) return;
+
+  const st = await checkAskAvailable();
+  if (!st.available) {
+    showAskSetup(st);
+    return;
+  }
+
+  $("askBtn").disabled = true;
+  $("meta").textContent = "Thinking…";
+  $("results").innerHTML = '<div class="empty">Searching documents and generating answer…</div>';
+
+  try {
+    const body = { question };
+    if ($("fFolder").value.trim()) body.folder = $("fFolder").value.trim();
+    if ($("fMethod").value) body.method = $("fMethod").value;
+    const res = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      $("meta").textContent = d.detail || "ask error";
+      if (res.status === 503) showAskSetup(st);
+      else $("results").innerHTML = '<div class="empty">Could not start ask job.</div>';
+      $("askBtn").disabled = false;
+      return;
+    }
+    pollAsk(d.job_id);
+  } catch {
+    $("meta").textContent = "could not start ask";
+    $("askBtn").disabled = false;
+  }
+}
+
+function setMode(m) {
+  mode = m;
+  $("modeSearch").classList.toggle("active", m === "search");
+  $("modeAsk").classList.toggle("active", m === "ask");
+  $("searchInput").style.display = m === "search" ? "" : "none";
+  $("askInput").style.display = m === "ask" ? "" : "none";
+  if (m === "search") {
+    $("results").innerHTML = '<div class="empty">Type to search your indexed PDFs.</div>';
+    $("meta").textContent = "";
+    runSearch();
+  } else {
+    $("results").innerHTML = '<div class="empty">Ask a question, then press Ask or Enter.</div>';
+    $("meta").textContent = "";
+    checkAskAvailable().then((st) => {
+      if (!st.available) showAskSetup(st);
+      else $("meta").textContent = `Model: ${st.model_name}` + (st.loaded ? " (loaded)" : "");
+    });
   }
 }
 
@@ -276,14 +530,16 @@ function highlightTerms(query) {
   return terms;
 }
 
-function openPage(doc, pageNumber, el) {
+function openPage(doc, pageNumber, el, termsOverride) {
   if (activeEl) activeEl.classList.remove("active");
   if (el) { el.classList.add("active"); activeEl = el; }
   $("placeholder").style.display = "none";
   $("viewerHead").style.display = "flex";
   const frame = $("viewer");
   frame.style.display = "block";
-  const terms = highlightTerms($("q").value.trim());
+  const terms = termsOverride !== undefined
+    ? termsOverride
+    : highlightTerms($("q").value.trim());
   if (viewerDocId === doc.document_id && frame.contentWindow &&
       frame.contentWindow.goToPage) {
     // Same PDF is already loaded — jump in place (no reload/re-fetch/re-parse).
@@ -376,7 +632,7 @@ async function pollStatus(jobId, btnOld) {
     }
   }
   await refreshStats();
-  runSearch();
+  if (mode === "search") runSearch();
   finishIndex(btnOld);
 }
 
@@ -483,9 +739,15 @@ async function openIssues() {
 }
 function closeIssues() { $("issuesOverlay").classList.remove("on"); }
 
-$("q").addEventListener("input", debounce(runSearch, 200));
-$("fFolder").addEventListener("input", debounce(runSearch, 200));
-$("fMethod").addEventListener("change", runSearch);
+$("q").addEventListener("input", debounce(() => { if (mode === "search") runSearch(); }, 200));
+$("fFolder").addEventListener("input", debounce(() => {
+  if (mode === "search") runSearch();
+}, 200));
+$("fMethod").addEventListener("change", () => { if (mode === "search") runSearch(); });
+$("modeSearch").addEventListener("click", () => setMode("search"));
+$("modeAsk").addEventListener("click", () => setMode("ask"));
+$("askBtn").addEventListener("click", runAsk);
+$("askQ").addEventListener("keydown", (e) => { if (e.key === "Enter") runAsk(); });
 $("indexBtn").addEventListener("click", doIndex);
 $("folder").addEventListener("keydown", (e) => { if (e.key === "Enter") doIndex(); });
 $("browseBtn").addEventListener("click", openBrowse);

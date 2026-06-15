@@ -34,12 +34,17 @@ See [offline-pdf-search-plan.md](offline-pdf-search-plan.md) for the full design
 OCR requires `ocrmypdf` + `tesseract` on PATH (optional). Remaining Phase 4 work:
 settings export/import.
 
+**Optional Ask mode** — natural-language questions with cited answers via a local
+GGUF model dropped into `models/` (off by default; see [PACKAGING.md](PACKAGING.md)).
+
 ## Setup
 
 ```sh
 python -m venv .venv
 .venv\Scripts\activate        # Windows;  source .venv/bin/activate on POSIX
 pip install -r requirements.txt
+# Optional — enable Ask mode:
+pip install -r requirements-llm.txt
 ```
 
 Requires Python 3.11+ and an SQLite build with FTS5 (the CPython default on
@@ -55,7 +60,8 @@ python -m app.main          # serves http://127.0.0.1:8765
 
 Open the URL, point the index box at a folder of PDFs, then search. Results show
 page-level hits with highlighted snippets and a native/OCR badge; clicking a
-result previews that page in the embedded viewer.
+result previews that page in the embedded viewer. Switch to **Ask** mode to pose
+natural-language questions (requires a local GGUF model in `models/`).
 
 ### CLI
 
@@ -88,6 +94,7 @@ python -m app.cli search '"SA-2024-0093"'        # exact reference code
 | `app/ocr.py` | OCRmyPDF/Tesseract fallback, content-hash cache |
 | `app/indexer.py` | Discovery, hash-based change detection, orchestration |
 | `app/search.py` | FTS5 MATCH, BM25 ranking, snippets, filters |
+| `app/ask.py` | Optional local LLM Ask mode (query expansion + cited RAG) |
 | `app/cli.py` | Command-line interface |
 | `app/main.py` | FastAPI app: web UI + JSON API + PDF serving |
 | `app/paths.py` | Frozen-aware resource/data dirs (source vs PyInstaller build) |

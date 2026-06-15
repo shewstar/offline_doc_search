@@ -68,5 +68,23 @@ def bundled_bin_dir() -> Path:
     return _install_root() / "bin"
 
 
+def models_dir() -> Path:
+    """Optional `models/` folder beside the install for drop-in GGUF models.
+
+    Not created automatically — place a single ``*.gguf`` instruct model here
+    to enable natural-language Ask mode. See PACKAGING.md.
+    """
+    return _install_root() / "models"
+
+
+def find_gguf_model() -> Path | None:
+    """Return the first ``*.gguf`` in ``models/`` (sorted by name), or None."""
+    d = models_dir()
+    if not d.is_dir():
+        return None
+    ggufs = sorted(d.glob("*.gguf"))
+    return ggufs[0] if ggufs else None
+
+
 # Read-only resource locations (resolved once at import).
 WEB_DIR = resource_root() / "web"

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, indexer, ocr, paths, search
+from . import ask, db, indexer, ocr, paths, search
 
 WEB_DIR = paths.WEB_DIR
 
@@ -128,6 +128,88 @@ def api_search(q: str = Query(""), limit: int = Query(50, ge=1, le=500),
         }
     finally:
         conn.close()
+
+
+# --- Optional Ask (local LLM) -------------------------------------------------
+
+class AskRequest(BaseModel):
+    question: str
+    folder: str | None = None
+    method: str | None = None
+
+
+_ask_jobs: dict[str, dict] = {}
+_ask_lock = threading.Lock()
+
+
+def _ask_worker(job_id: str, question: str, folder: str | None, method: str | None) -> None:
+    conn = db.connect()
+    db.init_schema(conn)
+    try:
+        result = ask.ask(conn, question, folder=folder, method=method)
+        with _ask_lock:
+            _ask_jobs[job_id].update({
+                "state": "done",
+                "answer": result.answer,
+                "sources": result.sources,
+                "search_queries": result.search_queries,
+                "took_ms": result.took_ms,
+            })
+    except Exception as exc:  # noqa: BLE001
+        with _ask_lock:
+            _ask_jobs[job_id].update({
+                "state": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    finally:
+        conn.close()
+
+
+@app.get("/api/ask/status")
+def api_ask_status(job_id: str | None = None) -> dict:
+    """Model availability (no job_id) or background Ask job status."""
+    if job_id is None:
+        return ask.status()
+    with _ask_lock:
+        job = _ask_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return {"job_id": job_id, **job}
+
+
+@app.post("/api/ask")
+def api_ask(req: AskRequest) -> dict:
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="empty question")
+
+    if not ask.model_available():
+        st = ask.status()
+        if not st["llama_installed"]:
+            detail = (
+                "llama-cpp-python not installed — "
+                "pip install -r requirements-llm.txt"
+            )
+        else:
+            detail = (
+                f"no GGUF model in {st['models_dir']} — "
+                "drop a *.gguf instruct model there (see PACKAGING.md)"
+            )
+        raise HTTPException(status_code=503, detail=detail)
+
+    with _ask_lock:
+        if any(j["state"] == "running" for j in _ask_jobs.values()):
+            raise HTTPException(status_code=409, detail="an ask job is already running")
+
+    job_id = uuid.uuid4().hex[:12]
+    with _ask_lock:
+        _ask_jobs[job_id] = {"state": "running", "error": None}
+    threading.Thread(
+        target=_ask_worker,
+        args=(job_id, question, req.folder, req.method),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id}
 
 
 class IndexRequest(BaseModel):

@@ -46,6 +46,7 @@ dist/offline-doc-search/
     app.db                   #   SQLite index (WAL files alongside)
     ocr-cache/               #   OCR'd PDFs, keyed by content hash
   bin/                       # OPTIONAL — drop OCR binaries here (see below)
+  models/                    # OPTIONAL — drop a GGUF model here for Ask mode (see below)
 ```
 
 Read-only resources (`web/`) are unpacked inside the bundle and located via
@@ -103,6 +104,47 @@ its `tessdata` directory. Bundle the languages your corpus needs; English ships
 with most Tesseract distributions. Select languages at index time with
 `--ocr-lang` (CLI) or the OCR language field (web UI), e.g. `eng` or `eng+deu`.
 
+## Local LLM for Ask mode (optional)
+
+Natural-language **Ask** mode is off by default. Keyword search works without any
+model. To enable Ask, install the optional Python dependency and drop a GGUF
+instruct model beside the executable:
+
+```sh
+pip install -r requirements-llm.txt
+```
+
+```text
+dist/offline-doc-search/
+  models/
+    qwen2.5-1.5b-instruct-q4_k_m.gguf    # example; any single *.gguf works
+```
+
+The app picks the first `*.gguf` in `models/` (sorted by name). Model discovery
+is handled in [`app/paths.py`](app/paths.py); inference in [`app/ask.py`](app/ask.py).
+
+### Recommended models (16 GB RAM laptops)
+
+| Model | Quantization | File size | RAM at inference |
+|---|---|---|---|
+| Qwen2.5-1.5B-Instruct | Q4_K_M | ~1 GB | ~2 GB |
+| Llama-3.2-3B-Instruct | Q4_K_M | ~2 GB | ~3–4 GB |
+
+Use **instruct/chat** variants only. Extraction or vision (VL) models often ignore
+the chat format and produce unusable answers; the app will fall back to excerpt
+quotes from retrieved pages, but a proper instruct model (e.g. Qwen2.5-1.5B-Instruct)
+gives much better synthesized answers. The model is lazy-loaded on the first Ask
+request and unloaded after 5 minutes of idle time to free RAM for indexing/OCR.
+
+Ask mode still uses FTS5 for retrieval — the LLM only expands the question into
+search terms and summarizes retrieved page excerpts with `[filename p.N]`
+citations. Answers are generated locally on `127.0.0.1`; nothing leaves the machine.
+
+> `llama-cpp-python` is intentionally **not** bundled in the default PyInstaller
+> build. Operators who need Ask install it in their build venv before packaging,
+> or run from source with `requirements-llm.txt`. The frozen app degrades
+> gracefully when the dependency or model is absent.
+
 ## Air-gapped dependency install
 
 If even the build machine is offline, build a wheelhouse on a connected machine:
@@ -110,6 +152,8 @@ If even the build machine is offline, build a wheelhouse on a connected machine:
 ```sh
 pip download -r requirements.txt -r requirements-build.txt -d wheelhouse
 ```
+
+Optional Ask mode adds `requirements-llm.txt` to the download list if needed.
 
 Transfer `wheelhouse/`, then on the air-gapped build machine:
 
