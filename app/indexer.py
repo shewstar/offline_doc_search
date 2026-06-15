@@ -11,6 +11,7 @@ import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from . import db, extractor, ocr
 
@@ -43,6 +44,25 @@ class IndexStats:
                 f"ocr_unavailable={self.ocr_unavailable}")
 
 
+@dataclass
+class Progress:
+    """Live snapshot passed to the progress callback after each unit of work.
+
+    `total_pages`/`pages_done` drive a page-weighted ETA: OCR cost scales with
+    pages, so pages are a better work unit than files.
+    """
+    phase: str = "starting"          # starting / scanning / indexing / done
+    total_files: int = 0             # files that need work (skips excluded)
+    total_pages: int = 0             # pages across those files
+    files_done: int = 0
+    pages_done: int = 0
+    current_file: str = ""
+    stats: "IndexStats" = field(default_factory=lambda: IndexStats())
+
+
+ProgressCB = Callable[[Progress], None]
+
+
 def discover_pdfs(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.pdf") if p.is_file())
 
@@ -56,11 +76,21 @@ def file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
 
 
 def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
-                 run_optimize: bool = True) -> IndexStats:
-    """Incrementally index every PDF under `root`. Returns counts."""
+                 run_optimize: bool = True,
+                 on_progress: ProgressCB | None = None) -> IndexStats:
+    """Incrementally index every PDF under `root`. Returns counts.
+
+    If `on_progress` is given it is called once after the initial scan (with
+    totals) and again after each file, so a caller can render a progress bar/ETA.
+    """
     root = Path(root).resolve()
     ocr_config = ocr_config or OcrConfig()
     stats = IndexStats()
+    progress = Progress(stats=stats)
+
+    def emit():
+        if on_progress:
+            on_progress(progress)
 
     existing = {
         row["path"]: row
@@ -70,20 +100,38 @@ def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
     }
     seen: set[str] = set()
 
+    # --- Scan pass: split fast-skips from real work, and size up the work. ---
+    progress.phase = "scanning"
+    emit()
+    candidates: list[tuple[Path, object]] = []   # (path, stat) needing hash/index
     for pdf in discover_pdfs(root):
         path_str = str(pdf)
         seen.add(path_str)
         try:
             stat = pdf.stat()
-            prior = existing.get(path_str)
+        except OSError:
+            continue
+        prior = existing.get(path_str)
+        if prior and prior["size_bytes"] == stat.st_size \
+                and abs(prior["modified_at"] - stat.st_mtime) < 1e-6:
+            stats.skipped += 1            # unchanged size+mtime => no work
+            continue
+        candidates.append((pdf, stat))
 
-            # Pre-filter: unchanged size+mtime => assume unchanged, skip hashing.
-            if prior and prior["size_bytes"] == stat.st_size \
-                    and abs(prior["modified_at"] - stat.st_mtime) < 1e-6:
-                stats.skipped += 1
-                continue
+    page_counts = {str(p): extractor.page_count(str(p)) for p, _ in candidates}
+    progress.total_files = len(candidates)
+    progress.total_pages = sum(page_counts.values())
+    progress.phase = "indexing"
+    emit()
 
+    # --- Work pass: hash, then index changed files. ---
+    for pdf, stat in candidates:
+        path_str = str(pdf)
+        progress.current_file = pdf.name
+        emit()
+        try:
             digest = file_hash(pdf)
+            prior = existing.get(path_str)
             if prior and prior["file_hash"] == digest:
                 # Content identical (e.g. just touched) — refresh metadata only.
                 conn.execute(
@@ -91,15 +139,17 @@ def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
                     (stat.st_mtime, stat.st_size, path_str),
                 )
                 stats.skipped += 1
-                continue
-
-            _index_one(conn, pdf, stat, digest, stats, ocr_config)
-            stats.indexed += 1
-            db.log_event(conn, "indexed", path_str)
+            else:
+                _index_one(conn, pdf, stat, digest, stats, ocr_config)
+                stats.indexed += 1
+                db.log_event(conn, "indexed", path_str)
         except Exception as exc:  # noqa: BLE001 - keep the batch going
             stats.failed += 1
             db.log_event(conn, "failed", path_str, f"{type(exc).__name__}: {exc}")
         conn.commit()
+        progress.files_done += 1
+        progress.pages_done += page_counts.get(path_str, 0)
+        emit()
 
     # Remove documents whose files are gone (pages + FTS cascade/triggers handle rest).
     for path_str in set(existing) - seen:
@@ -110,6 +160,9 @@ def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
 
     if run_optimize and stats.indexed:
         db.optimize(conn)
+    progress.phase = "done"
+    progress.current_file = ""
+    emit()
     return stats
 
 

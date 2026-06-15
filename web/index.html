@@ -59,6 +59,17 @@
   iframe { flex: 1; border: 0; width: 100%; background: #525860; }
   .placeholder { flex: 1; display: flex; align-items: center; justify-content: center;
                  color: #cfd4da; font-size: 13px; }
+  .progress { display: none; background: var(--panel); border-bottom: 1px solid var(--line);
+              padding: 8px 16px; gap: 12px; align-items: center; }
+  .progress.on { display: flex; }
+  .bar { flex: 1; height: 8px; background: #e7ebf1; border-radius: 6px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0%; background: var(--accent);
+             transition: width .3s ease; }
+  .bar.indeterminate > i { width: 35% !important; animation: slide 1.1s infinite ease-in-out; }
+  @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+  .progress .ptext { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .progress .pcur { font-size: 12px; color: var(--ink); max-width: 240px;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -73,6 +84,13 @@
     <button id="indexBtn">Index</button>
   </div>
 </header>
+
+<div class="progress" id="progress">
+  <span class="ptext" id="pphase">Indexing…</span>
+  <div class="bar" id="bar"><i id="barfill"></i></div>
+  <span class="pcur" id="pcur"></span>
+  <span class="ptext" id="peta"></span>
+</div>
 
 <main>
   <div class="left">
@@ -169,29 +187,107 @@ function openDoc(h, el) {
   $("rawLink").href = `/api/file?id=${h.document_id}`;
 }
 
+function fmtDuration(s) {
+  if (s == null) return "—";
+  s = Math.round(s);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m < 60) return `${m}m ${r}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function showProgress(on) {
+  $("progress").classList.toggle("on", on);
+}
+
+function renderProgress(j) {
+  const phaseLabel = {
+    starting: "Starting…", scanning: "Scanning folder…",
+    indexing: "Indexing…", done: "Done", error: "Error",
+  }[j.phase] || "Working…";
+  $("pphase").textContent = phaseLabel;
+
+  const bar = $("bar"), fill = $("barfill");
+  if (j.phase === "scanning" || (j.phase === "indexing" && !j.total_pages)) {
+    bar.classList.add("indeterminate");          // unknown total yet
+    $("peta").textContent = "";
+  } else {
+    bar.classList.remove("indeterminate");
+    const pct = j.total_pages ? Math.min(100, 100 * j.pages_done / j.total_pages) : 0;
+    fill.style.width = pct.toFixed(1) + "%";
+    if (j.phase === "indexing") {
+      $("peta").textContent =
+        `${j.files_done}/${j.total_files} files · ${fmtDuration(j.elapsed_s)} elapsed` +
+        (j.eta_s != null ? ` · ~${fmtDuration(j.eta_s)} left` : "");
+    }
+  }
+  $("pcur").textContent = j.current_file || "";
+}
+
+let pollTimer = null;
+
+async function pollStatus(jobId, btnOld) {
+  let j;
+  try {
+    const res = await fetch("/api/index/status?job_id=" + jobId);
+    if (!res.ok) throw new Error("status " + res.status);
+    j = await res.json();
+  } catch (e) {
+    $("meta").textContent = "lost contact with index job"; finishIndex(btnOld); return;
+  }
+  renderProgress(j);
+
+  if (j.state === "running") {
+    pollTimer = setTimeout(() => pollStatus(jobId, btnOld), 800);
+    return;
+  }
+  // Terminal: done or error.
+  if (j.state === "error") {
+    $("meta").textContent = "index error: " + (j.error || "unknown");
+  } else {
+    let msg = `indexed ${j.indexed}, skipped ${j.skipped}, deleted ${j.deleted}` +
+              ` in ${fmtDuration(j.elapsed_s)}`;
+    if (j.scanned_detected) msg += ` · ${j.scanned_detected} scanned`;
+    if (j.ocr_done) msg += ` · ${j.ocr_done} OCR'd`;
+    if (j.ocr_warning) msg += ` · ⚠ ${j.ocr_warning}`;
+    $("meta").textContent = msg;
+  }
+  await refreshStats();
+  runSearch();
+  finishIndex(btnOld);
+}
+
+function finishIndex(btnOld) {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  showProgress(false);
+  $("bar").classList.remove("indeterminate");
+  $("indexBtn").disabled = false; $("indexBtn").textContent = btnOld;
+}
+
 async function doIndex() {
   const folder = $("folder").value.trim();
   if (!folder) return;
-  $("indexBtn").disabled = true;
-  const old = $("indexBtn").textContent;
-  $("indexBtn").textContent = "Indexing…";
+  const btnOld = $("indexBtn").textContent;
+  $("indexBtn").disabled = true; $("indexBtn").textContent = "Indexing…";
+  $("barfill").style.width = "0%";
+  showProgress(true);
+  renderProgress({ phase: "starting" });
   try {
     const res = await fetch("/api/index", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ folder, ocr: $("ocr").checked }),
     });
     const d = await res.json();
-    if (!res.ok) { $("meta").textContent = d.detail || "index error"; return; }
-    let msg = `indexed ${d.indexed}, skipped ${d.skipped}, deleted ${d.deleted}` +
-              ` in ${d.took_s}s`;
-    if (d.scanned_detected) msg += ` · ${d.scanned_detected} scanned`;
-    if (d.ocr_done) msg += ` · ${d.ocr_done} OCR'd`;
-    if (d.ocr_warning) msg += ` · ⚠ ${d.ocr_warning}`;
-    $("meta").textContent = msg;
-    await refreshStats();
-    runSearch();
-  } finally {
-    $("indexBtn").disabled = false; $("indexBtn").textContent = old;
+    if (!res.ok) {
+      $("meta").textContent = d.detail || "index error";
+      finishIndex(btnOld); return;
+    }
+    if (d.ocr_warning) $("meta").textContent = "⚠ " + d.ocr_warning;
+    pollStatus(d.job_id, btnOld);
+  } catch (e) {
+    $("meta").textContent = "could not start indexing";
+    finishIndex(btnOld);
   }
 }
 

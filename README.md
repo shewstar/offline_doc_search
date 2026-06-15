@@ -13,7 +13,9 @@ See [offline-pdf-search-plan.md](offline-pdf-search-plan.md) for the full design
   cached by content hash; degrades gracefully when the toolchain is absent.
 - **Phase 3** — local web UI (FastAPI, bound to `127.0.0.1`) with debounced
   search, folder/source filters, highlighted snippets, index controls, and an
-  embedded PDF viewer that opens to the matched page.
+  embedded PDF viewer that opens to the matched page. Indexing runs as a
+  background job with a live progress bar and a page-weighted ETA (polled via
+  `/api/index/status`).
 
 OCR requires `ocrmypdf` + `tesseract` on PATH (optional). Phase 4 hardening
 (bundled PDF.js viewer, async index progress, packaging) is not done yet.

@@ -37,6 +37,15 @@ def normalize(text: str) -> str:
     return text.strip()
 
 
+def page_count(pdf_path: str) -> int:
+    """Cheap page count without extracting text (used to size up indexing work)."""
+    try:
+        with fitz.open(pdf_path) as doc:
+            return doc.page_count
+    except Exception:
+        return 0
+
+
 def extract_pages(pdf_path: str) -> list[PageText]:
     """Extract normalized text for every page. Raises on unreadable PDFs."""
     pages: list[PageText] = []
