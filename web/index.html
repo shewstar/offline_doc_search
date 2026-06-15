@@ -37,20 +37,27 @@
   .meta { padding: 6px 16px; color: var(--muted); font-size: 12px;
           border-bottom: 1px solid var(--line); }
   .results { overflow-y: auto; flex: 1; }
-  .hit { padding: 11px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
-  .hit:hover { background: #eef3ff; }
-  .hit.active { background: #e0eaff; }
-  .hit .top { display: flex; gap: 8px; align-items: baseline; }
-  .hit .fn { font-weight: 600; }
-  .hit .pg { color: var(--muted); font-size: 12px; }
   .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 600;
            text-transform: uppercase; letter-spacing: .03em; }
   .badge.native { color: var(--badge-native); background: #d1fae5; }
   .badge.ocr { color: var(--badge-ocr); background: #fef3c7; }
-  .hit .folder { color: var(--muted); font-size: 11px; margin-top: 1px;
-                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hit .snip { margin-top: 5px; color: #2b3444; }
-  .hit mark, .snip mark { background: var(--mark); padding: 0 1px; border-radius: 2px; }
+  .docgroup { border-bottom: 1px solid var(--line); }
+  .dochead { padding: 10px 16px 6px; display: flex; gap: 8px; align-items: baseline;
+             cursor: pointer; }
+  .dochead:hover { background: #f0f4ff; }
+  .dochead .fn { font-weight: 650; }
+  .dochead .cnt { color: var(--muted); font-size: 12px; }
+  .dochead .folder { color: var(--muted); font-size: 11px; margin-left: auto;
+                     max-width: 45%; white-space: nowrap; overflow: hidden;
+                     text-overflow: ellipsis; }
+  .pagehit { padding: 6px 16px 8px 30px; cursor: pointer; display: flex; gap: 10px;
+             align-items: baseline; border-top: 1px solid #f0f2f5; }
+  .pagehit:hover { background: #eef3ff; }
+  .pagehit.active { background: #e0eaff; }
+  .pagehit .pg { color: var(--muted); font-size: 12px; flex: none; min-width: 34px; }
+  .pagehit .snip { color: #2b3444; }
+  .morepages { padding: 4px 16px 8px 30px; color: var(--muted); font-size: 11px; }
+  mark { background: var(--mark); padding: 0 1px; border-radius: 2px; }
   .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
   .right { flex: 1; display: flex; flex-direction: column; background: #525860; }
   .viewer-head { background: var(--panel); border-bottom: 1px solid var(--line);
@@ -155,36 +162,60 @@ async function runSearch() {
     $("results").innerHTML = ""; return;
   }
   const data = await res.json();
-  $("meta").textContent = `${data.count} hit(s) · ${data.took_ms} ms`;
-  if (!data.hits.length) {
+  $("meta").textContent =
+    `${data.doc_count} document(s) · ${data.page_count} page hit(s) · ${data.took_ms} ms`;
+  if (!data.documents.length) {
     $("results").innerHTML = '<div class="empty">No matches.</div>'; return;
   }
   $("results").innerHTML = "";
-  for (const h of data.hits) {
-    const el = document.createElement("div");
-    el.className = "hit";
-    el.innerHTML =
-      `<div class="top"><span class="fn"></span>` +
-      `<span class="pg">p.${h.page_number}</span>` +
-      `<span class="badge ${h.method}">${h.method}</span></div>` +
-      `<div class="folder"></div><div class="snip">${h.snippet_html}</div>`;
-    el.querySelector(".fn").textContent = h.filename;
-    el.querySelector(".folder").textContent = h.folder;
-    el.onclick = () => openDoc(h, el);
-    $("results").appendChild(el);
+  for (const doc of data.documents) {
+    const group = document.createElement("div");
+    group.className = "docgroup";
+
+    const head = document.createElement("div");
+    head.className = "dochead";
+    const matchLabel = doc.matched_pages === 1 ? "1 page" : `${doc.matched_pages} pages`;
+    head.innerHTML =
+      `<span class="fn"></span>` +
+      `<span class="badge ${doc.method}">${doc.method}</span>` +
+      `<span class="cnt">${matchLabel}</span>` +
+      `<span class="folder"></span>`;
+    head.querySelector(".fn").textContent = doc.filename;
+    head.querySelector(".folder").textContent = doc.folder;
+    group.appendChild(head);
+
+    let firstRow = null;
+    for (const pg of doc.pages) {
+      const row = document.createElement("div");
+      row.className = "pagehit";
+      row.innerHTML = `<span class="pg">p.${pg.page_number}</span>` +
+                      `<span class="snip">${pg.snippet_html}</span>`;
+      row.onclick = () => openPage(doc, pg.page_number, row);
+      group.appendChild(row);
+      if (!firstRow) firstRow = row;
+    }
+    if (doc.more > 0) {
+      const more = document.createElement("div");
+      more.className = "morepages";
+      more.textContent = `+${doc.more} more matching page${doc.more === 1 ? "" : "s"}`;
+      group.appendChild(more);
+    }
+    // Clicking the document header opens its best-matching page.
+    head.onclick = () => openPage(doc, doc.pages[0].page_number, firstRow);
+    $("results").appendChild(group);
   }
 }
 
-function openDoc(h, el) {
+function openPage(doc, pageNumber, el) {
   if (activeEl) activeEl.classList.remove("active");
-  el.classList.add("active"); activeEl = el;
-  const url = `/api/file?id=${h.document_id}#page=${h.page_number}`;
+  if (el) { el.classList.add("active"); activeEl = el; }
+  const url = `/api/file?id=${doc.document_id}#page=${pageNumber}`;
   $("placeholder").style.display = "none";
   $("viewerHead").style.display = "flex";
   $("viewer").style.display = "block";
   $("viewer").src = url;
-  $("viewerTitle").textContent = `${h.filename} — page ${h.page_number}`;
-  $("rawLink").href = `/api/file?id=${h.document_id}`;
+  $("viewerTitle").textContent = `${doc.filename} — page ${pageNumber}`;
+  $("rawLink").href = `/api/file?id=${doc.document_id}`;
 }
 
 function fmtDuration(s) {

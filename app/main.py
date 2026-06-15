@@ -60,6 +60,47 @@ def api_stats() -> dict:
         conn.close()
 
 
+# How many page hits to scan before grouping, and how many pages to show per doc.
+_PAGE_SCAN = 500
+_PAGES_PER_DOC = 4
+
+
+def _group_by_document(hits, doc_limit: int) -> list[dict]:
+    """Collapse ranked page hits into documents, best-matching document first.
+
+    Order is preserved from the bm25-ranked hits, so the first page seen for a
+    document is its strongest match and sets the document's position.
+    """
+    order: list[int] = []
+    groups: dict[int, dict] = {}
+    for h in hits:
+        g = groups.get(h.document_id)
+        if g is None:
+            g = {
+                "document_id": h.document_id,
+                "filename": h.filename,
+                "folder": h.folder,
+                "method": h.extraction_method,
+                "matched_pages": 0,
+                "pages": [],
+            }
+            groups[h.document_id] = g
+            order.append(h.document_id)
+        g["matched_pages"] += 1
+        if len(g["pages"]) < _PAGES_PER_DOC:
+            g["pages"].append({
+                "page_number": h.page_number,
+                "method": h.extraction_method,
+                "snippet_html": _snippet_html(h.snippet),
+            })
+    docs = []
+    for doc_id in order[:doc_limit]:
+        g = groups[doc_id]
+        g["more"] = g["matched_pages"] - len(g["pages"])  # extra pages not shown
+        docs.append(g)
+    return docs
+
+
 @app.get("/api/search")
 def api_search(q: str = Query(""), limit: int = Query(50, ge=1, le=500),
                folder: str | None = None, method: str | None = None) -> dict:
@@ -67,25 +108,17 @@ def api_search(q: str = Query(""), limit: int = Query(50, ge=1, le=500),
     try:
         t0 = time.perf_counter()
         try:
-            hits = search.search(conn, q, limit=limit, folder=folder,
+            hits = search.search(conn, q, limit=_PAGE_SCAN, folder=folder,
                                  method=method, hl_open=_HL_OPEN, hl_close=_HL_CLOSE)
         except Exception as exc:  # malformed FTS query -> 400, not 500
             raise HTTPException(status_code=400, detail=f"bad query: {exc}")
+        docs = _group_by_document(hits, doc_limit=limit)
         took_ms = (time.perf_counter() - t0) * 1000
         return {
             "took_ms": round(took_ms, 1),
-            "count": len(hits),
-            "hits": [
-                {
-                    "document_id": h.document_id,
-                    "filename": h.filename,
-                    "folder": h.folder,
-                    "page_number": h.page_number,
-                    "method": h.extraction_method,
-                    "snippet_html": _snippet_html(h.snippet),
-                }
-                for h in hits
-            ],
+            "doc_count": len(docs),
+            "page_count": len(hits),
+            "documents": docs,
         }
     finally:
         conn.close()
