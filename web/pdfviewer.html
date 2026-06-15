@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF</title>
+<link rel="stylesheet" href="./pdfjs/pdf_viewer.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #525860; }
+  /* PDF.js positions pages absolutely inside .pdfViewer, so the scroll
+     container must be positioned and fill the frame. */
+  #viewerContainer { position: absolute; inset: 0; overflow: auto; }
+  #viewer { padding: 8px 0; }
+  .loaderr { color: #cfd4da; font: 14px/1.5 system-ui, sans-serif; padding: 24px; }
+</style>
+</head>
+<body>
+<div id="viewerContainer"><div id="viewer" class="pdfViewer"></div></div>
+<script type="module">
+  import { getDocument, GlobalWorkerOptions } from "./pdfjs/pdf.mjs";
+  import { EventBus, PDFViewer, PDFLinkService, PDFFindController }
+    from "./pdfjs/pdf_viewer.mjs";
+
+  GlobalWorkerOptions.workerSrc = "./pdfjs/pdf.worker.mjs";
+
+  const container = document.getElementById("viewerContainer");
+  const eventBus = new EventBus();
+  const linkService = new PDFLinkService({ eventBus });
+  const findController = new PDFFindController({ eventBus, linkService });
+  const pdfViewer = new PDFViewer({
+    container,
+    viewer: document.getElementById("viewer"),
+    eventBus,
+    linkService,
+    findController,
+  });
+  linkService.setViewer(pdfViewer);
+
+  const params = new URLSearchParams(location.search);
+  const fileUrl = params.get("file");
+  let pendingPage = parseInt(params.get("page") || "1", 10) || 1;
+
+  // Terms to highlight in the page text, passed as a JSON array (the parent
+  // strips FTS operators first). Falls back to treating ?q= as a plain string.
+  function parseTerms(raw) {
+    if (!raw) return [];
+    try {
+      const v = JSON.parse(raw);
+      return Array.isArray(v) ? v.filter(Boolean) : (v ? [String(v)] : []);
+    } catch {
+      return [raw];
+    }
+  }
+  let searchTerms = parseTerms(params.get("q"));
+
+  // Highlight every occurrence of the terms across the document. highlightAll
+  // marks them all; we don't move the view to the "selected" match, so the
+  // page we navigated to stays put while its matches light up.
+  function runFind() {
+    if (!searchTerms.length) return;
+    eventBus.dispatch("find", {
+      source: null, type: "",
+      query: searchTerms,
+      caseSensitive: false, entireWord: false,
+      highlightAll: true, findPrevious: false, matchDiacritics: false,
+    });
+  }
+
+  // The parent calls this when the search query changes while the same PDF is
+  // already open, so highlights track the latest search.
+  window.setSearch = (terms) => {
+    searchTerms = Array.isArray(terms) ? terms.filter(Boolean) : [];
+    runFind();
+  };
+
+  // Clamp to the document's real page range so a stale page number (e.g. the
+  // file changed on disk after indexing) can't throw.
+  const clampPage = (n) =>
+    Math.min(Math.max(1, n | 0), pdfViewer.pagesCount || 1);
+
+  // Fit to width once the document's page layout is known, then jump to the
+  // requested page.
+  eventBus.on("pagesinit", () => {
+    pdfViewer.currentScaleValue = "page-width";
+    if (pendingPage > 1) pdfViewer.currentPageNumber = clampPage(pendingPage);
+  });
+
+  // Kick off highlighting only once a text layer actually exists — dispatching
+  // "find" any earlier silently no-ops. Fires once on the first rendered page.
+  let didInitialFind = false;
+  eventBus.on("textlayerrendered", () => {
+    if (didInitialFind) return;
+    didInitialFind = true;
+    runFind();
+  });
+
+  // Keep fit-to-width on resize.
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (pdfViewer.pagesCount) pdfViewer.currentScaleValue = "page-width";
+    }, 120);
+  });
+
+  // The parent window calls this to jump pages on the already-loaded PDF — no
+  // reload, no re-fetch, no re-parse.
+  window.goToPage = (n) => {
+    if (pdfViewer.pagesCount) pdfViewer.currentPageNumber = clampPage(n);
+    else pendingPage = n;  // not loaded yet; apply on pagesinit
+  };
+
+  if (fileUrl) {
+    getDocument({
+      url: fileUrl,
+      cMapUrl: "./pdfjs/cmaps/",
+      cMapPacked: true,
+      standardFontDataUrl: "./pdfjs/standard_fonts/",
+    }).promise.then((doc) => {
+      // Give the find controller the document before the viewer, since
+      // setDocument fires "pagesinit" (where we kick off highlighting) and the
+      // controller must already know the document by then.
+      findController.setDocument(doc);
+      linkService.setDocument(doc, null);
+      pdfViewer.setDocument(doc);
+    }).catch((err) => {
+      document.body.innerHTML =
+        '<div class="loaderr">Could not load PDF: ' +
+        ((err && err.message) || err) + "</div>";
+    });
+  }
+</script>
+</body>
+</html>

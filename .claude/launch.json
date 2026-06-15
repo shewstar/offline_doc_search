@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "offline-doc-search",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "app.main"],
+      "port": 8765
+    }
+  ]
+}

@@ -9,6 +9,7 @@ Run:  python -m app.main         (or: uvicorn app.main:app)
 from __future__ import annotations
 
 import html
+import mimetypes
 import threading
 import time
 import uuid
@@ -16,11 +17,16 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db, indexer, ocr, search
 
 WEB_DIR = db.PROJECT_ROOT / "web"
+
+# ES modules must be served as JavaScript or browsers refuse to execute them;
+# Python's mimetypes doesn't know .mjs on all platforms (notably Windows).
+mimetypes.add_type("text/javascript", ".mjs")
 
 # Sentinel markers FTS wraps around matches; we HTML-escape the snippet first,
 # then swap these for <mark> so user text can never inject markup.
@@ -46,6 +52,12 @@ def index_page() -> str:
     return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
+# Static assets (the vendored PDF.js viewer + its worker/fonts/cmaps, and
+# pdfviewer.html) are served from here. Mounted on a subpath so it never
+# shadows "/" or the "/api/*" routes.
+app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+
 @app.get("/api/stats")
 def api_stats() -> dict:
     conn = _conn()
@@ -60,16 +72,16 @@ def api_stats() -> dict:
         conn.close()
 
 
-# How many page hits to scan before grouping, and how many pages to show per doc.
+# How many page hits to scan before grouping into documents.
 _PAGE_SCAN = 500
-_PAGES_PER_DOC = 4
 
 
 def _group_by_document(hits, doc_limit: int) -> list[dict]:
     """Collapse ranked page hits into documents, best-matching document first.
 
     Order is preserved from the bm25-ranked hits, so the first page seen for a
-    document is its strongest match and sets the document's position.
+    document is its strongest match and sets the document's position. Every
+    matched page (within the scan cap) is returned so the UI can show them all.
     """
     order: list[int] = []
     groups: dict[int, dict] = {}
@@ -87,18 +99,12 @@ def _group_by_document(hits, doc_limit: int) -> list[dict]:
             groups[h.document_id] = g
             order.append(h.document_id)
         g["matched_pages"] += 1
-        if len(g["pages"]) < _PAGES_PER_DOC:
-            g["pages"].append({
-                "page_number": h.page_number,
-                "method": h.extraction_method,
-                "snippet_html": _snippet_html(h.snippet),
-            })
-    docs = []
-    for doc_id in order[:doc_limit]:
-        g = groups[doc_id]
-        g["more"] = g["matched_pages"] - len(g["pages"])  # extra pages not shown
-        docs.append(g)
-    return docs
+        g["pages"].append({
+            "page_number": h.page_number,
+            "method": h.extraction_method,
+            "snippet_html": _snippet_html(h.snippet),
+        })
+    return [groups[doc_id] for doc_id in order[:doc_limit]]
 
 
 @app.get("/api/search")
@@ -240,7 +246,10 @@ def api_file(id: int) -> FileResponse:
     path = Path(row["path"])
     if not path.is_file():
         raise HTTPException(status_code=410, detail="file no longer on disk")
-    return FileResponse(path, media_type="application/pdf", filename=row["filename"])
+    # inline (not attachment) so the browser renders the PDF in the iframe
+    # instead of downloading it. filename still sets a sensible name for "open raw".
+    return FileResponse(path, media_type="application/pdf", filename=row["filename"],
+                        content_disposition_type="inline")
 
 
 @app.get("/api/browse")

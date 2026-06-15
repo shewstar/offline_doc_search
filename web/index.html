@@ -45,6 +45,11 @@
   .dochead { padding: 10px 16px 6px; display: flex; gap: 8px; align-items: baseline;
              cursor: pointer; }
   .dochead:hover { background: #f0f4ff; }
+  .dochead .caret { flex: none; width: 18px; color: var(--muted); font-size: 16px;
+                    line-height: 1; cursor: pointer; transition: transform .12s ease; }
+  .dochead .caret:hover { color: var(--accent); }
+  .docgroup.collapsed .caret { transform: rotate(-90deg); }
+  .docgroup.collapsed .pagelist { display: none; }
   .dochead .fn { font-weight: 650; }
   .dochead .cnt { color: var(--muted); font-size: 12px; }
   .dochead .folder { color: var(--muted); font-size: 11px; margin-left: auto;
@@ -56,7 +61,6 @@
   .pagehit.active { background: #e0eaff; }
   .pagehit .pg { color: var(--muted); font-size: 12px; flex: none; min-width: 34px; }
   .pagehit .snip { color: #2b3444; }
-  .morepages { padding: 4px 16px 8px 30px; color: var(--muted); font-size: 11px; }
   mark { background: var(--mark); padding: 0 1px; border-radius: 2px; }
   .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
   .right { flex: 1; display: flex; flex-direction: column; background: #525860; }
@@ -183,6 +187,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let activeEl = null;
+let viewerDocId = null;  // which document the PDF.js iframe currently has loaded
 
 async function refreshStats() {
   try {
@@ -221,12 +226,13 @@ async function runSearch() {
   $("results").innerHTML = "";
   for (const doc of data.documents) {
     const group = document.createElement("div");
-    group.className = "docgroup";
+    group.className = "docgroup collapsed";
 
     const head = document.createElement("div");
     head.className = "dochead";
     const matchLabel = doc.matched_pages === 1 ? "1 page" : `${doc.matched_pages} pages`;
     head.innerHTML =
+      `<span class="caret">▾</span>` +
       `<span class="fn"></span>` +
       `<span class="badge ${doc.method}">${doc.method}</span>` +
       `<span class="cnt">${matchLabel}</span>` +
@@ -235,36 +241,60 @@ async function runSearch() {
     head.querySelector(".folder").textContent = doc.folder;
     group.appendChild(head);
 
-    let firstRow = null;
+    const pagelist = document.createElement("div");
+    pagelist.className = "pagelist";
     for (const pg of doc.pages) {
       const row = document.createElement("div");
       row.className = "pagehit";
       row.innerHTML = `<span class="pg">p.${pg.page_number}</span>` +
                       `<span class="snip">${pg.snippet_html}</span>`;
       row.onclick = () => openPage(doc, pg.page_number, row);
-      group.appendChild(row);
-      if (!firstRow) firstRow = row;
+      pagelist.appendChild(row);
     }
-    if (doc.more > 0) {
-      const more = document.createElement("div");
-      more.className = "morepages";
-      more.textContent = `+${doc.more} more matching page${doc.more === 1 ? "" : "s"}`;
-      group.appendChild(more);
-    }
-    // Clicking the document header opens its best-matching page.
-    head.onclick = () => openPage(doc, doc.pages[0].page_number, firstRow);
+    group.appendChild(pagelist);
+
+    // Clicking the header (filename or caret) expands/collapses this
+    // document's hit list; clicking an individual page opens it.
+    head.onclick = () => group.classList.toggle("collapsed");
     $("results").appendChild(group);
   }
+}
+
+// Turn an FTS query into plain terms PDF.js can highlight: keep quoted phrases
+// whole, drop boolean operators and wildcard markers.
+function highlightTerms(query) {
+  const terms = [];
+  const phrase = /"([^"]+)"/g;
+  let m;
+  while ((m = phrase.exec(query))) { if (m[1].trim()) terms.push(m[1].trim()); }
+  for (let tok of query.replace(/"[^"]*"/g, " ").split(/\s+/)) {
+    tok = tok.replace(/\*/g, "").replace(/^[-+]/, "").trim();
+    if (!tok) continue;
+    if (["AND", "OR", "NOT", "NEAR"].includes(tok.toUpperCase())) continue;
+    terms.push(tok);
+  }
+  return terms;
 }
 
 function openPage(doc, pageNumber, el) {
   if (activeEl) activeEl.classList.remove("active");
   if (el) { el.classList.add("active"); activeEl = el; }
-  const url = `/api/file?id=${doc.document_id}#page=${pageNumber}`;
   $("placeholder").style.display = "none";
   $("viewerHead").style.display = "flex";
-  $("viewer").style.display = "block";
-  $("viewer").src = url;
+  const frame = $("viewer");
+  frame.style.display = "block";
+  const terms = highlightTerms($("q").value.trim());
+  if (viewerDocId === doc.document_id && frame.contentWindow &&
+      frame.contentWindow.goToPage) {
+    // Same PDF is already loaded — jump in place (no reload/re-fetch/re-parse).
+    if (frame.contentWindow.setSearch) frame.contentWindow.setSearch(terms);
+    frame.contentWindow.goToPage(pageNumber);
+  } else {
+    const file = encodeURIComponent(`/api/file?id=${doc.document_id}`);
+    const q = encodeURIComponent(JSON.stringify(terms));
+    frame.src = `/assets/pdfviewer.html?file=${file}&page=${pageNumber}&q=${q}`;
+    viewerDocId = doc.document_id;
+  }
   $("viewerTitle").textContent = `${doc.filename} — page ${pageNumber}`;
   $("rawLink").href = `/api/file?id=${doc.document_id}`;
 }
