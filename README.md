@@ -6,11 +6,17 @@ SQLite FTS5 and PyMuPDF. No network, no cloud, no telemetry.
 
 See [offline-pdf-search-plan.md](offline-pdf-search-plan.md) for the full design.
 
-## Status: Phase 1 (proof of concept)
+## Status: Phases 1–3
 
-Native-text PDF extraction + FTS5 indexing + CLI search. OCR (Phase 2) and the
-local web UI (Phase 3) are not built yet; scanned PDFs are detected and flagged
-(`ocr_status='required'`) but not yet OCR'd.
+- **Phase 1** — native-text extraction (PyMuPDF) + FTS5 indexing + CLI search.
+- **Phase 2** — OCR fallback for scanned PDFs via the OCRmyPDF/Tesseract CLI,
+  cached by content hash; degrades gracefully when the toolchain is absent.
+- **Phase 3** — local web UI (FastAPI, bound to `127.0.0.1`) with debounced
+  search, folder/source filters, highlighted snippets, index controls, and an
+  embedded PDF viewer that opens to the matched page.
+
+OCR requires `ocrmypdf` + `tesseract` on PATH (optional). Phase 4 hardening
+(bundled PDF.js viewer, async index progress, packaging) is not done yet.
 
 ## Setup
 
@@ -25,10 +31,23 @@ Windows/macOS includes it).
 
 ## Usage
 
+### Web UI
+
 ```sh
-python -m app.cli index <folder>      # scan + index a folder tree of PDFs
-python -m app.cli search "<query>"    # FTS5 syntax: "exact phrase", term*, AND/OR/NOT
-python -m app.cli stats               # document / page counts
+python -m app.main          # serves http://127.0.0.1:8765
+```
+
+Open the URL, point the index box at a folder of PDFs, then search. Results show
+page-level hits with highlighted snippets and a native/OCR badge; clicking a
+result previews that page in the embedded viewer.
+
+### CLI
+
+```sh
+python -m app.cli index <folder>          # scan + index a folder tree of PDFs
+python -m app.cli index <folder> --ocr    # also OCR scanned PDFs (needs toolchain)
+python -m app.cli search "<query>"        # FTS5 syntax: "exact phrase", term*, AND/OR/NOT
+python -m app.cli stats                   # document / page counts
 ```
 
 The index lives in `data/app.db` (override with `--db <path>`). Indexing is
@@ -50,6 +69,9 @@ python -m app.cli search '"SA-2024-0093"'        # exact reference code
 |---|---|
 | `app/db.py` | Schema, PRAGMAs (WAL/mmap), FTS5 external-content table + triggers |
 | `app/extractor.py` | PyMuPDF text extraction + scanned-PDF heuristic |
+| `app/ocr.py` | OCRmyPDF/Tesseract fallback, content-hash cache |
 | `app/indexer.py` | Discovery, hash-based change detection, orchestration |
-| `app/search.py` | FTS5 MATCH, BM25 ranking, snippets |
-| `app/cli.py` | Phase 1 command-line interface |
+| `app/search.py` | FTS5 MATCH, BM25 ranking, snippets, filters |
+| `app/cli.py` | Command-line interface |
+| `app/main.py` | FastAPI app: web UI + JSON API + PDF serving |
+| `web/index.html` | Single-file frontend (search, filters, viewer) |

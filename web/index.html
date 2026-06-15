@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offline PDF Search</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #1c2330; --muted: #6b7686;
+    --line: #e3e7ec; --accent: #2563eb; --mark: #fff2a8;
+    --badge-ocr: #b45309; --badge-native: #047857;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: var(--ink);
+         background: var(--bg); height: 100vh; display: flex; flex-direction: column; }
+  header { background: var(--panel); border-bottom: 1px solid var(--line);
+           padding: 10px 16px; display: flex; gap: 16px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  header .stats { color: var(--muted); font-size: 12px; }
+  .index-bar { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  input, select, button { font: inherit; }
+  input[type=text] { padding: 7px 10px; border: 1px solid var(--line);
+                     border-radius: 7px; background: #fff; }
+  button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px;
+           background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .left { width: 46%; min-width: 360px; border-right: 1px solid var(--line);
+          display: flex; flex-direction: column; }
+  .searchrow { padding: 12px 16px; background: var(--panel);
+               border-bottom: 1px solid var(--line); }
+  .searchrow input#q { width: 100%; font-size: 15px; padding: 10px 12px; }
+  .filters { display: flex; gap: 8px; margin-top: 8px; align-items: center;
+             color: var(--muted); font-size: 12px; }
+  .filters input, .filters select { padding: 5px 8px; font-size: 12px; }
+  .meta { padding: 6px 16px; color: var(--muted); font-size: 12px;
+          border-bottom: 1px solid var(--line); }
+  .results { overflow-y: auto; flex: 1; }
+  .hit { padding: 11px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .hit:hover { background: #eef3ff; }
+  .hit.active { background: #e0eaff; }
+  .hit .top { display: flex; gap: 8px; align-items: baseline; }
+  .hit .fn { font-weight: 600; }
+  .hit .pg { color: var(--muted); font-size: 12px; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 600;
+           text-transform: uppercase; letter-spacing: .03em; }
+  .badge.native { color: var(--badge-native); background: #d1fae5; }
+  .badge.ocr { color: var(--badge-ocr); background: #fef3c7; }
+  .hit .folder { color: var(--muted); font-size: 11px; margin-top: 1px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hit .snip { margin-top: 5px; color: #2b3444; }
+  .hit mark, .snip mark { background: var(--mark); padding: 0 1px; border-radius: 2px; }
+  .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
+  .right { flex: 1; display: flex; flex-direction: column; background: #525860; }
+  .viewer-head { background: var(--panel); border-bottom: 1px solid var(--line);
+                 padding: 8px 14px; font-size: 12px; color: var(--muted);
+                 display: flex; gap: 10px; align-items: center; }
+  iframe { flex: 1; border: 0; width: 100%; background: #525860; }
+  .placeholder { flex: 1; display: flex; align-items: center; justify-content: center;
+                 color: #cfd4da; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Offline PDF Search</h1>
+  <span class="stats" id="stats">…</span>
+  <div class="index-bar">
+    <input type="text" id="folder" placeholder="folder to index…" size="22">
+    <label style="font-size:12px;color:var(--muted)">
+      <input type="checkbox" id="ocr"> OCR
+    </label>
+    <button id="indexBtn">Index</button>
+  </div>
+</header>
+
+<main>
+  <div class="left">
+    <div class="searchrow">
+      <input type="text" id="q" placeholder="Search…  (use &quot;exact phrase&quot;, term*, AND/OR/NOT)" autofocus>
+      <div class="filters">
+        <span>filters:</span>
+        <input type="text" id="fFolder" placeholder="folder contains…" size="16">
+        <select id="fMethod">
+          <option value="">any source</option>
+          <option value="native">native</option>
+          <option value="ocr">OCR</option>
+        </select>
+      </div>
+    </div>
+    <div class="meta" id="meta"></div>
+    <div class="results" id="results">
+      <div class="empty">Type to search your indexed PDFs.</div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="viewer-head" id="viewerHead" style="display:none">
+      <span id="viewerTitle"></span>
+      <a id="rawLink" href="#" target="_blank" style="margin-left:auto">open raw</a>
+    </div>
+    <div class="placeholder" id="placeholder">Select a result to preview the page.</div>
+    <iframe id="viewer" style="display:none"></iframe>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let activeEl = null;
+
+async function refreshStats() {
+  try {
+    const s = await (await fetch("/api/stats")).json();
+    $("stats").textContent =
+      `${s.documents} docs · ${s.pages} pages` +
+      (s.ocr_pending ? ` · ${s.ocr_pending} OCR pending` : "");
+  } catch { $("stats").textContent = ""; }
+}
+
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+async function runSearch() {
+  const q = $("q").value.trim();
+  const params = new URLSearchParams({ q });
+  if ($("fFolder").value.trim()) params.set("folder", $("fFolder").value.trim());
+  if ($("fMethod").value) params.set("method", $("fMethod").value);
+  if (!q) {
+    $("results").innerHTML = '<div class="empty">Type to search your indexed PDFs.</div>';
+    $("meta").textContent = ""; return;
+  }
+  const res = await fetch("/api/search?" + params.toString());
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    $("meta").textContent = e.detail || "query error";
+    $("results").innerHTML = ""; return;
+  }
+  const data = await res.json();
+  $("meta").textContent = `${data.count} hit(s) · ${data.took_ms} ms`;
+  if (!data.hits.length) {
+    $("results").innerHTML = '<div class="empty">No matches.</div>'; return;
+  }
+  $("results").innerHTML = "";
+  for (const h of data.hits) {
+    const el = document.createElement("div");
+    el.className = "hit";
+    el.innerHTML =
+      `<div class="top"><span class="fn"></span>` +
+      `<span class="pg">p.${h.page_number}</span>` +
+      `<span class="badge ${h.method}">${h.method}</span></div>` +
+      `<div class="folder"></div><div class="snip">${h.snippet_html}</div>`;
+    el.querySelector(".fn").textContent = h.filename;
+    el.querySelector(".folder").textContent = h.folder;
+    el.onclick = () => openDoc(h, el);
+    $("results").appendChild(el);
+  }
+}
+
+function openDoc(h, el) {
+  if (activeEl) activeEl.classList.remove("active");
+  el.classList.add("active"); activeEl = el;
+  const url = `/api/file?id=${h.document_id}#page=${h.page_number}`;
+  $("placeholder").style.display = "none";
+  $("viewerHead").style.display = "flex";
+  $("viewer").style.display = "block";
+  $("viewer").src = url;
+  $("viewerTitle").textContent = `${h.filename} — page ${h.page_number}`;
+  $("rawLink").href = `/api/file?id=${h.document_id}`;
+}
+
+async function doIndex() {
+  const folder = $("folder").value.trim();
+  if (!folder) return;
+  $("indexBtn").disabled = true;
+  const old = $("indexBtn").textContent;
+  $("indexBtn").textContent = "Indexing…";
+  try {
+    const res = await fetch("/api/index", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder, ocr: $("ocr").checked }),
+    });
+    const d = await res.json();
+    if (!res.ok) { $("meta").textContent = d.detail || "index error"; return; }
+    let msg = `indexed ${d.indexed}, skipped ${d.skipped}, deleted ${d.deleted}` +
+              ` in ${d.took_s}s`;
+    if (d.scanned_detected) msg += ` · ${d.scanned_detected} scanned`;
+    if (d.ocr_done) msg += ` · ${d.ocr_done} OCR'd`;
+    if (d.ocr_warning) msg += ` · ⚠ ${d.ocr_warning}`;
+    $("meta").textContent = msg;
+    await refreshStats();
+    runSearch();
+  } finally {
+    $("indexBtn").disabled = false; $("indexBtn").textContent = old;
+  }
+}
+
+$("q").addEventListener("input", debounce(runSearch, 200));
+$("fFolder").addEventListener("input", debounce(runSearch, 200));
+$("fMethod").addEventListener("change", runSearch);
+$("indexBtn").addEventListener("click", doIndex);
+$("folder").addEventListener("keydown", (e) => { if (e.key === "Enter") doIndex(); });
+refreshStats();
+</script>
+</body>
+</html>

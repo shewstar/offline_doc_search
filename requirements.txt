@@ -1,5 +1,4 @@
 pymupdf>=1.24
-# Phase 3+ (web UI / API), not required for the Phase 1 CLI PoC:
-# fastapi
-# uvicorn
+fastapi>=0.110
+uvicorn[standard]>=0.27
 # Phase 2 (OCR) is shelled out to the OCRmyPDF/Tesseract binaries, not pip-installed here.
