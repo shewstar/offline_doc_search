@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import mimetypes
+import re
 import threading
 import time
 import uuid
@@ -75,24 +76,53 @@ def api_stats() -> dict:
 # How many page hits to scan before grouping into documents.
 _PAGE_SCAN = 500
 
+# Sort keys the search UI offers. "relevance" keeps bm25 order (with a
+# filename-match boost); the rest reorder the grouped documents by metadata.
+_SORTS = {"relevance", "name", "newest", "oldest", "largest", "smallest"}
 
-def _group_by_document(hits, doc_limit: int) -> list[dict]:
+
+def _plain_query_terms(q: str) -> list[str]:
+    """Plain words from an FTS query — quoted phrases kept, operators dropped.
+
+    Mirrors the UI's highlightTerms() so a document whose *name* matches what
+    the user typed can be boosted, even if the term is rare in its body text.
+    """
+    terms: list[str] = []
+    for m in re.finditer(r'"([^"]+)"', q):
+        phrase = m.group(1).strip().lower()
+        if phrase:
+            terms.append(phrase)
+    for tok in re.sub(r'"[^"]*"', " ", q).split():
+        tok = tok.replace("*", "").lstrip("-+").strip().lower()
+        if len(tok) >= 2 and tok.upper() not in ("AND", "OR", "NOT", "NEAR"):
+            terms.append(tok)
+    return terms
+
+
+def _group_by_document(hits, terms: list[str]) -> list[dict]:
     """Collapse ranked page hits into documents, best-matching document first.
 
     Order is preserved from the bm25-ranked hits, so the first page seen for a
     document is its strongest match and sets the document's position. Every
     matched page (within the scan cap) is returned so the UI can show them all.
+
+    `filename_match` flags documents whose name or folder contains a query term;
+    callers use it to float likely "I searched the title" hits to the top.
     """
     order: list[int] = []
     groups: dict[int, dict] = {}
     for h in hits:
         g = groups.get(h.document_id)
         if g is None:
+            hay = f"{h.filename}\n{h.folder}".lower()
             g = {
                 "document_id": h.document_id,
                 "filename": h.filename,
                 "folder": h.folder,
                 "method": h.extraction_method,
+                "modified_at": h.modified_at,
+                "size_bytes": h.size_bytes,
+                "filename_match": any(t in hay for t in terms),
                 "matched_pages": 0,
                 "pages": [],
             }
@@ -104,12 +134,103 @@ def _group_by_document(hits, doc_limit: int) -> list[dict]:
             "method": h.extraction_method,
             "snippet_html": _snippet_html(h.snippet),
         })
-    return [groups[doc_id] for doc_id in order[:doc_limit]]
+    return [groups[doc_id] for doc_id in order]
+
+
+def _sort_documents(docs: list[dict], sort: str) -> list[dict]:
+    """Reorder grouped documents. `docs` arrives in bm25-relevance order."""
+    if sort == "name":
+        return sorted(docs, key=lambda d: d["filename"].lower())
+    if sort == "newest":
+        return sorted(docs, key=lambda d: d["modified_at"], reverse=True)
+    if sort == "oldest":
+        return sorted(docs, key=lambda d: d["modified_at"])
+    if sort == "largest":
+        return sorted(docs, key=lambda d: d["size_bytes"], reverse=True)
+    if sort == "smallest":
+        return sorted(docs, key=lambda d: d["size_bytes"])
+    # relevance: stable sort floats filename/folder matches up, bm25 order kept.
+    return sorted(docs, key=lambda d: 0 if d["filename_match"] else 1)
+
+
+def _levenshtein(a: str, b: str, cutoff: int) -> int | None:
+    """Edit distance, short-circuited to None once it provably exceeds `cutoff`."""
+    if abs(len(a) - len(b)) > cutoff:
+        return None
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            cur.append(v)
+            row_min = min(row_min, v)
+        if row_min > cutoff:
+            return None
+        prev = cur
+    return prev[-1] if prev[-1] <= cutoff else None
+
+
+def _closest_term(conn, term: str) -> str | None:
+    """Nearest vocabulary term to `term` by edit distance, tie-broken by frequency.
+
+    Candidates are limited to terms sharing the first character and a similar
+    length, which keeps the scan small. (Typos rarely change the first letter;
+    that's an accepted limitation for the common case.)
+    """
+    cutoff = 1 if len(term) <= 4 else 2
+    first = term[0]
+    upper = first[:-1] + chr(ord(first[-1]) + 1) if first else first
+    rows = conn.execute(
+        """SELECT term, doc FROM pages_vocab
+           WHERE term >= ? AND term < ?
+             AND length(term) BETWEEN ? AND ?
+           ORDER BY doc DESC LIMIT 600""",
+        (first, upper, max(1, len(term) - 2), len(term) + 2),
+    ).fetchall()
+    best: str | None = None
+    best_key = (cutoff + 1, 0)
+    for r in rows:
+        cand = r["term"]
+        if cand == term:
+            return None  # already a real term — nothing to correct
+        d = _levenshtein(term, cand, cutoff)
+        if d is None:
+            continue
+        key = (d, -r["doc"])  # closest first, then most common
+        if key < best_key:
+            best_key, best = key, cand
+    return best
+
+
+def _did_you_mean(conn, q: str) -> str | None:
+    """A corrected query string when each unknown word has a near vocab match.
+
+    Only triggers on plain word queries (no phrases/operators) so we never
+    rewrite something the user expressed deliberately.
+    """
+    raw_terms = re.findall(r"[^\W\d_]{3,}", q, re.UNICODE)
+    if not raw_terms or len(raw_terms) > 4:
+        return None
+    if re.search(r'["*]|\b(AND|OR|NOT|NEAR)\b', q):
+        return None
+    suggestion = q
+    changed = False
+    for term in raw_terms:
+        cand = _closest_term(conn, term.lower())
+        if cand:
+            suggestion = re.sub(r"(?i)\b" + re.escape(term) + r"\b", cand, suggestion)
+            changed = True
+    return suggestion if changed and suggestion.lower() != q.lower() else None
 
 
 @app.get("/api/search")
 def api_search(q: str = Query(""), limit: int = Query(50, ge=1, le=500),
-               folder: str | None = None, method: str | None = None) -> dict:
+               folder: str | None = None, method: str | None = None,
+               sort: str = Query("relevance")) -> dict:
+    if sort not in _SORTS:
+        sort = "relevance"
     conn = _conn()
     try:
         t0 = time.perf_counter()
@@ -118,14 +239,43 @@ def api_search(q: str = Query(""), limit: int = Query(50, ge=1, le=500),
                                  method=method, hl_open=_HL_OPEN, hl_close=_HL_CLOSE)
         except Exception as exc:  # malformed FTS query -> 400, not 500
             raise HTTPException(status_code=400, detail=f"bad query: {exc}")
-        docs = _group_by_document(hits, doc_limit=limit)
+        docs = _group_by_document(hits, _plain_query_terms(q))
+        docs = _sort_documents(docs, sort)[:limit]
+        # Only spend the vocab lookup when a real query found nothing.
+        did_you_mean = _did_you_mean(conn, q) if (q.strip() and not docs) else None
         took_ms = (time.perf_counter() - t0) * 1000
         return {
             "took_ms": round(took_ms, 1),
             "doc_count": len(docs),
             "page_count": len(hits),
             "documents": docs,
+            "did_you_mean": did_you_mean,
         }
+    finally:
+        conn.close()
+
+
+@app.get("/api/suggest")
+def api_suggest(q: str = Query(""), limit: int = Query(8, ge=1, le=20)) -> dict:
+    """Term completions for search-as-you-type, ranked by document frequency.
+
+    Reads the live FTS vocabulary (pages_vocab). Terms are already lowercased and
+    diacritic-folded by the tokenizer, so we match a lowercased prefix range.
+    """
+    prefix = "".join(c for c in q.strip().lower() if c.isalnum())
+    if len(prefix) < 2:
+        return {"suggestions": []}
+    # Half-open prefix range [prefix, prefix++) — all terms starting with prefix.
+    upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """SELECT term FROM pages_vocab
+               WHERE term >= ? AND term < ? AND term <> ?
+               ORDER BY doc DESC, term ASC LIMIT ?""",
+            (prefix, upper, prefix, limit),
+        ).fetchall()
+        return {"suggestions": [r["term"] for r in rows]}
     finally:
         conn.close()
 
@@ -332,6 +482,30 @@ def api_file(id: int) -> FileResponse:
     # instead of downloading it. filename still sets a sensible name for "open raw".
     return FileResponse(path, media_type="application/pdf", filename=row["filename"],
                         content_disposition_type="inline")
+
+
+@app.get("/api/page")
+def api_page(id: int, page: int = Query(1, ge=1)) -> dict:
+    """Stored text of one page — backs the text viewer for non-PDF documents."""
+    conn = _conn()
+    try:
+        doc = conn.execute(
+            "SELECT filename, page_count FROM documents WHERE id=?", (id,)
+        ).fetchone()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="unknown document")
+        row = conn.execute(
+            "SELECT text_content FROM pages WHERE document_id=? AND page_number=?",
+            (id, page),
+        ).fetchone()
+        return {
+            "filename": doc["filename"],
+            "page_number": page,
+            "page_count": doc["page_count"],
+            "text": row["text_content"] if row else "",
+        }
+    finally:
+        conn.close()
 
 
 @app.get("/api/browse")

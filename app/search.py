@@ -15,10 +15,13 @@ class Hit:
     extraction_method: str
     snippet: str
     rank: float
+    modified_at: float = 0.0
+    size_bytes: int = 0
 
 
 _SQL = """
 SELECT d.id AS document_id, d.filename, d.path, d.folder,
+       d.modified_at, d.size_bytes,
        p.page_number, p.extraction_method,
        snippet(pages_fts, 0, ?, ?, ' … ', 12) AS snip,
        bm25(pages_fts) AS rank
@@ -68,6 +71,8 @@ def search(conn, query: str, *, limit: int = 50,
             extraction_method=r["extraction_method"],
             snippet=r["snip"],
             rank=r["rank"],
+            modified_at=r["modified_at"],
+            size_bytes=r["size_bytes"],
         )
         for r in rows
     ]

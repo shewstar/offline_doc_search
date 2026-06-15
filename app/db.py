@@ -72,6 +72,11 @@ CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages BEGIN
     INSERT INTO pages_fts(rowid, text_content) VALUES (new.id, new.text_content);
 END;
 
+-- Read-only view of the FTS vocabulary (term, #docs, #occurrences). Drives
+-- search-as-you-type suggestions without storing anything extra — it reflects
+-- the live pages_fts index. See app.main /api/suggest.
+CREATE VIRTUAL TABLE IF NOT EXISTS pages_vocab USING fts5vocab('pages_fts', 'row');
+
 -- Operational log for auditability/troubleshooting.
 CREATE TABLE IF NOT EXISTS index_events (
     id        INTEGER PRIMARY KEY,

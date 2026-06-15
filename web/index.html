@@ -31,6 +31,21 @@
   .searchrow { padding: 12px 16px; background: var(--panel);
                border-bottom: 1px solid var(--line); }
   .searchrow input#q { width: 100%; font-size: 15px; padding: 10px 12px; }
+  #searchInput { position: relative; }
+  .suggest { position: absolute; left: 0; right: 0; top: 100%; z-index: 30;
+             background: var(--panel); border: 1px solid var(--line);
+             border-radius: 0 0 7px 7px; box-shadow: 0 8px 24px rgba(20,26,38,.12);
+             overflow: hidden; display: none; }
+  .suggest.on { display: block; }
+  .suggest .sg { padding: 7px 12px; cursor: pointer; font-size: 13px;
+                 display: flex; gap: 8px; align-items: baseline; }
+  .suggest .sg.active, .suggest .sg:hover { background: #eef3ff; }
+  .suggest .sg .pre { color: var(--ink); font-weight: 600; }
+  .suggest .sg .rest { color: var(--muted); }
+  .dochead .namematch { font-size: 10px; padding: 1px 6px; border-radius: 4px;
+                        font-weight: 600; text-transform: uppercase;
+                        letter-spacing: .03em; color: var(--accent);
+                        background: #e0eaff; }
   .filters { display: flex; gap: 8px; margin-top: 8px; align-items: center;
              color: var(--muted); font-size: 12px; }
   .filters input, .filters select { padding: 5px 8px; font-size: 12px; }
@@ -121,6 +136,16 @@
   .answer-card .cite:hover { color: #1d4ed8; }
   .setup-hint { padding: 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
   .setup-hint code { font-size: 12px; background: #eef1f5; padding: 1px 5px; border-radius: 4px; }
+  .textviewer { flex: 1; flex-direction: column; background: #fff; min-height: 0; }
+  .tv-nav { display: flex; gap: 10px; align-items: center; padding: 8px 14px;
+            border-bottom: 1px solid var(--line); background: var(--panel); }
+  .tv-nav button { padding: 4px 10px; font-size: 12px; }
+  .tv-nav .tv-lbl { color: var(--muted); font-size: 12px; }
+  .tv-body { overflow-y: auto; flex: 1; padding: 18px 22px; white-space: pre-wrap;
+             word-wrap: break-word; font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace;
+             color: var(--ink); }
+  .tv-body .tv-empty, .tv-loading { color: var(--muted); }
+  .tv-loading { padding: 18px 22px; }
 </style>
 </head>
 <body>
@@ -152,7 +177,9 @@
         <button type="button" id="modeAsk">Ask</button>
       </div>
       <div id="searchInput">
-        <input type="text" id="q" placeholder="Search…  (use &quot;exact phrase&quot;, term*, AND/OR/NOT)" autofocus>
+        <input type="text" id="q" placeholder="Search…  (use &quot;exact phrase&quot;, term*, AND/OR/NOT)"
+               autocomplete="off" autofocus>
+        <div class="suggest" id="suggest"></div>
       </div>
       <div id="askInput" style="display:none">
         <div class="ask-row">
@@ -168,11 +195,19 @@
           <option value="native">native</option>
           <option value="ocr">OCR</option>
         </select>
+        <select id="fSort" title="Sort results">
+          <option value="relevance">relevance</option>
+          <option value="name">name (A–Z)</option>
+          <option value="newest">newest</option>
+          <option value="oldest">oldest</option>
+          <option value="largest">largest</option>
+          <option value="smallest">smallest</option>
+        </select>
       </div>
     </div>
     <div class="meta" id="meta"></div>
     <div class="results" id="results">
-      <div class="empty">Type to search your indexed PDFs.</div>
+      <div class="empty">Type to search your indexed documents.</div>
     </div>
   </div>
 
@@ -183,6 +218,7 @@
     </div>
     <div class="placeholder" id="placeholder">Select a result to preview the page.</div>
     <iframe id="viewer" style="display:none"></iframe>
+    <div class="textviewer" id="textviewer" style="display:none"></div>
   </div>
 </main>
 
@@ -248,6 +284,7 @@ function renderDocuments(documents, emptyMsg) {
       `<span class="caret">▾</span>` +
       `<span class="fn"></span>` +
       `<span class="badge ${doc.method}">${doc.method}</span>` +
+      (doc.filename_match ? `<span class="namematch">name</span>` : "") +
       `<span class="cnt">${matchLabel}</span>` +
       `<span class="folder"></span>`;
     head.querySelector(".fn").textContent = doc.filename;
@@ -349,8 +386,9 @@ async function runSearch() {
   const params = new URLSearchParams({ q });
   if ($("fFolder").value.trim()) params.set("folder", $("fFolder").value.trim());
   if ($("fMethod").value) params.set("method", $("fMethod").value);
+  if ($("fSort").value) params.set("sort", $("fSort").value);
   if (!q) {
-    $("results").innerHTML = '<div class="empty">Type to search your indexed PDFs.</div>';
+    $("results").innerHTML = '<div class="empty">Type to search your indexed documents.</div>';
     $("meta").textContent = ""; return;
   }
   const res = await fetch("/api/search?" + params.toString());
@@ -362,7 +400,25 @@ async function runSearch() {
   const data = await res.json();
   $("meta").textContent =
     `${data.doc_count} document(s) · ${data.page_count} page hit(s) · ${data.took_ms} ms`;
-  renderDocuments(data.documents, "No matches.");
+  if (!data.documents.length && data.did_you_mean) {
+    renderDidYouMean(data.did_you_mean);
+  } else {
+    renderDocuments(data.documents, "No matches.");
+  }
+}
+
+function renderDidYouMean(suggestion) {
+  const wrap = document.createElement("div");
+  wrap.className = "empty";
+  wrap.appendChild(document.createTextNode("No matches. Did you mean "));
+  const link = document.createElement("span");
+  link.className = "issueslink";
+  link.textContent = suggestion;
+  link.onclick = () => { $("q").value = suggestion; hideSuggest(); runSearch(); };
+  wrap.appendChild(link);
+  wrap.appendChild(document.createTextNode("?"));
+  $("results").innerHTML = "";
+  $("results").appendChild(wrap);
 }
 
 async function checkAskAvailable() {
@@ -375,12 +431,20 @@ function showAskSetup(st) {
   const dir = st.models_dir || "models/";
   let msg = '<div class="setup-hint">';
   if (!st.llama_installed) {
-    msg += "<strong>Ask mode needs llama-cpp-python.</strong><br>" +
-           "Install with: <code>pip install -r requirements-llm.txt</code><br><br>";
+    msg += "<strong>Ask mode needs llama-cpp-python.</strong><br>";
+    if (st.frozen) {
+      msg += "Rebuild the bundle with <code>build.ps1 -WithLlm</code> (see PACKAGING.md).<br><br>";
+    } else {
+      msg += "Install with: <code>pip install -r requirements-llm.txt</code><br><br>";
+    }
   }
-  msg += "<strong>No local model found.</strong><br>" +
-         `Drop a GGUF instruct model into <code>${dir}</code> ` +
-         "(e.g. Qwen2.5-1.5B-Instruct Q4_K_M). See PACKAGING.md.";
+  if (!st.model_name) {
+    msg += "<strong>No local model found.</strong><br>" +
+           `Drop a GGUF instruct model into <code>${dir}</code> ` +
+           "(e.g. Qwen2.5-1.5B-Instruct Q4_K_M). See PACKAGING.md.";
+  } else if (!st.llama_installed) {
+    msg += `Model ready: <code>${st.model_name}</code> — waiting for llama-cpp-python.`;
+  }
   msg += "</div>";
   $("results").innerHTML = msg;
   $("meta").textContent = "";
@@ -496,12 +560,13 @@ async function runAsk() {
 
 function setMode(m) {
   mode = m;
+  hideSuggest();
   $("modeSearch").classList.toggle("active", m === "search");
   $("modeAsk").classList.toggle("active", m === "ask");
   $("searchInput").style.display = m === "search" ? "" : "none";
   $("askInput").style.display = m === "ask" ? "" : "none";
   if (m === "search") {
-    $("results").innerHTML = '<div class="empty">Type to search your indexed PDFs.</div>';
+    $("results").innerHTML = '<div class="empty">Type to search your indexed documents.</div>';
     $("meta").textContent = "";
     runSearch();
   } else {
@@ -535,24 +600,83 @@ function openPage(doc, pageNumber, el, termsOverride) {
   if (el) { el.classList.add("active"); activeEl = el; }
   $("placeholder").style.display = "none";
   $("viewerHead").style.display = "flex";
-  const frame = $("viewer");
-  frame.style.display = "block";
   const terms = termsOverride !== undefined
     ? termsOverride
     : highlightTerms($("q").value.trim());
-  if (viewerDocId === doc.document_id && frame.contentWindow &&
-      frame.contentWindow.goToPage) {
-    // Same PDF is already loaded — jump in place (no reload/re-fetch/re-parse).
-    if (frame.contentWindow.setSearch) frame.contentWindow.setSearch(terms);
-    frame.contentWindow.goToPage(pageNumber);
+  const isPdf = (doc.filename || "").toLowerCase().endsWith(".pdf");
+  if (isPdf) {
+    $("textviewer").style.display = "none";
+    const frame = $("viewer");
+    frame.style.display = "block";
+    if (viewerDocId === doc.document_id && frame.contentWindow &&
+        frame.contentWindow.goToPage) {
+      // Same PDF is already loaded — jump in place (no reload/re-fetch/re-parse).
+      if (frame.contentWindow.setSearch) frame.contentWindow.setSearch(terms);
+      frame.contentWindow.goToPage(pageNumber);
+    } else {
+      const file = encodeURIComponent(`/api/file?id=${doc.document_id}`);
+      const q = encodeURIComponent(JSON.stringify(terms));
+      frame.src = `/assets/pdfviewer.html?file=${file}&page=${pageNumber}&q=${q}`;
+      viewerDocId = doc.document_id;
+    }
   } else {
-    const file = encodeURIComponent(`/api/file?id=${doc.document_id}`);
-    const q = encodeURIComponent(JSON.stringify(terms));
-    frame.src = `/assets/pdfviewer.html?file=${file}&page=${pageNumber}&q=${q}`;
-    viewerDocId = doc.document_id;
+    // Non-PDF: render stored page text (PDF.js can't parse it).
+    $("viewer").style.display = "none";
+    viewerDocId = null;  // force a reload next time a PDF is opened
+    showTextPage(doc, pageNumber, terms);
   }
   $("viewerTitle").textContent = `${doc.filename} — page ${pageNumber}`;
   $("rawLink").href = `/api/file?id=${doc.document_id}`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+function highlightHtml(text, terms) {
+  const safe = (terms || []).filter(Boolean)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!safe.length) return escapeHtml(text);
+  const re = new RegExp("(" + safe.join("|") + ")", "gi");
+  let out = "", last = 0, m;
+  while ((m = re.exec(text))) {
+    out += escapeHtml(text.slice(last, m.index)) + "<mark>" + escapeHtml(m[0]) + "</mark>";
+    last = m.index + m[0].length;
+    if (m.index === re.lastIndex) re.lastIndex++;  // guard against empty matches
+  }
+  return out + escapeHtml(text.slice(last));
+}
+
+async function showTextPage(doc, pageNumber, terms) {
+  const tv = $("textviewer");
+  tv.style.display = "flex";
+  tv.innerHTML = '<div class="tv-loading">Loading…</div>';
+  let data;
+  try {
+    data = await (await fetch(`/api/page?id=${doc.document_id}&page=${pageNumber}`)).json();
+  } catch {
+    tv.innerHTML = '<div class="tv-loading">Could not load page.</div>'; return;
+  }
+  const pg = data.page_number || pageNumber;
+  const total = data.page_count || pg;
+  tv.innerHTML = "";
+  const nav = document.createElement("div");
+  nav.className = "tv-nav";
+  const prev = document.createElement("button");
+  prev.textContent = "‹ Prev"; prev.disabled = pg <= 1;
+  prev.onclick = () => showTextPage(doc, pg - 1, terms);
+  const next = document.createElement("button");
+  next.textContent = "Next ›"; next.disabled = pg >= total;
+  next.onclick = () => showTextPage(doc, pg + 1, terms);
+  const lbl = document.createElement("span");
+  lbl.className = "tv-lbl"; lbl.textContent = `page ${pg} / ${total}`;
+  nav.append(prev, lbl, next);
+  const body = document.createElement("div");
+  body.className = "tv-body";
+  if (data.text) body.innerHTML = highlightHtml(data.text, terms);
+  else body.innerHTML = '<span class="tv-empty">(no text on this page)</span>';
+  tv.append(nav, body);
+  $("viewerTitle").textContent = `${doc.filename} — page ${pg}`;
 }
 
 function fmtDuration(s) {
@@ -739,7 +863,89 @@ async function openIssues() {
 }
 function closeIssues() { $("issuesOverlay").classList.remove("on"); }
 
+// ---- Search-as-you-type suggestions (fts5vocab) ----
+let suggestItems = [];   // current suggestion terms
+let suggestIdx = -1;     // keyboard-highlighted row, -1 = none
+
+const lastToken = (s) => (s.match(/(\S*)$/) || [""])[0];
+const cleanPrefix = (tok) => tok.replace(/[^0-9a-z]/gi, "").toLowerCase();
+
+function hideSuggest() {
+  suggestItems = []; suggestIdx = -1;
+  $("suggest").classList.remove("on");
+  $("suggest").innerHTML = "";
+}
+
+function applySuggest(term) {
+  const v = $("q").value;
+  $("q").value = v.replace(/(\S*)$/, term) + " ";
+  hideSuggest();
+  $("q").focus();
+  runSearch();
+}
+
+function renderSuggest(prefix) {
+  const box = $("suggest");
+  box.innerHTML = "";
+  suggestItems.forEach((term, i) => {
+    const row = document.createElement("div");
+    row.className = "sg" + (i === suggestIdx ? " active" : "");
+    const rest = term.startsWith(prefix) ? term.slice(prefix.length) : term;
+    const pre = term.startsWith(prefix) ? prefix : "";
+    row.innerHTML = `<span class="pre"></span><span class="rest"></span>`;
+    row.querySelector(".pre").textContent = pre;
+    row.querySelector(".rest").textContent = rest;
+    // mousedown (not click) so the input never blurs before we apply.
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); applySuggest(term); });
+    box.appendChild(row);
+  });
+  box.classList.toggle("on", suggestItems.length > 0);
+}
+
+const fetchSuggest = debounce(async () => {
+  if (mode !== "search") return hideSuggest();
+  const prefix = cleanPrefix(lastToken($("q").value));
+  if (prefix.length < 2) return hideSuggest();
+  let data;
+  try {
+    data = await (await fetch("/api/suggest?q=" + encodeURIComponent(prefix))).json();
+  } catch { return hideSuggest(); }
+  // Ignore a stale response if the user kept typing a different token.
+  if (cleanPrefix(lastToken($("q").value)) !== prefix) return;
+  suggestItems = data.suggestions || [];
+  suggestIdx = -1;
+  renderSuggest(prefix);
+}, 120);
+
+function suggestKeydown(e) {
+  if (!suggestItems.length) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    suggestIdx = (suggestIdx + 1) % suggestItems.length;
+    renderSuggest(cleanPrefix(lastToken($("q").value)));
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    suggestIdx = (suggestIdx - 1 + suggestItems.length) % suggestItems.length;
+    renderSuggest(cleanPrefix(lastToken($("q").value)));
+  } else if (e.key === "Enter") {
+    // Enter accepts the highlighted suggestion, or just dismisses the list
+    // (the search already ran on input) — either way the dropdown closes.
+    if (suggestIdx >= 0) {
+      e.preventDefault();
+      applySuggest(suggestItems[suggestIdx]);
+    } else {
+      hideSuggest();
+    }
+  } else if (e.key === "Escape") {
+    hideSuggest();
+  }
+}
+
 $("q").addEventListener("input", debounce(() => { if (mode === "search") runSearch(); }, 200));
+$("q").addEventListener("input", fetchSuggest);
+$("q").addEventListener("keydown", suggestKeydown);
+$("q").addEventListener("blur", () => setTimeout(hideSuggest, 150));
+$("fSort").addEventListener("change", () => { if (mode === "search") runSearch(); });
 $("fFolder").addEventListener("input", debounce(() => {
   if (mode === "search") runSearch();
 }, 200));

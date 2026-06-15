@@ -10,7 +10,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 # SPECPATH is injected by PyInstaller = the directory containing this spec.
 ROOT = Path(SPECPATH).resolve().parent  # repo root (spec lives in packaging/)
@@ -30,9 +30,25 @@ hidden = (
         "app.extractor",
         "app.ocr",
         "app.search",
+        "app.ask",
         "app.paths",
     ]
 )
+
+# Optional Ask mode: when llama-cpp-python is installed in the build venv,
+# bundle it (and its native llama.dll) into the frozen app. Without it, ask.py
+# degrades gracefully and keyword search is unaffected.
+binaries: list = []
+runtime_hooks: list = []
+try:
+    import llama_cpp  # noqa: F401
+
+    hidden += collect_submodules("llama_cpp")
+    binaries += collect_dynamic_libs("llama_cpp")
+    hidden.append("numpy")
+    runtime_hooks.append(str(ROOT / "packaging" / "pyi_rth_llama_cpp.py"))
+except ImportError:
+    pass
 
 # The static web UI (HTML/CSS/JS) and the vendored PDF.js viewer are read-only
 # resources, unpacked under sys._MEIPASS and found via app.paths.WEB_DIR.
@@ -43,15 +59,15 @@ datas = [
 a = Analysis(
     [str(ROOT / "run_app.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],
-    runtime_hooks=[],
+    runtime_hooks=runtime_hooks,
     excludes=[
         # Trim heavy libs that are never imported, keeping the bundle lean.
+        # numpy is required by llama-cpp-python when Ask mode is bundled.
         "tkinter",
-        "numpy",
         "pytest",
     ],
     noarchive=False,

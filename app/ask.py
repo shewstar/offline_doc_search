@@ -146,6 +146,7 @@ def status() -> dict:
         "model_name": path.name if path else None,
         "loaded": model_loaded(),
         "models_dir": str(paths.models_dir()),
+        "frozen": paths.is_frozen(),
     }
 
 

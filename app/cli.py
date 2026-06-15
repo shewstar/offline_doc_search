@@ -28,7 +28,8 @@ def _cmd_index(args) -> int:
     conn = db.connect(args.db)
     db.init_schema(conn)
     t0 = time.perf_counter()
-    stats = indexer.index_folder(conn, root, ocr_config=ocr_config)
+    stats = indexer.index_folder(conn, root, ocr_config=ocr_config,
+                                 max_workers=args.workers)
     dt = time.perf_counter() - t0
     print(f"{stats.summary()}  ({dt:.2f}s)")
     if stats.scanned_pdfs:
@@ -80,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
                          help="OCR scanned PDFs via ocrmypdf (slower)")
     p_index.add_argument("--ocr-lang", default="eng",
                          help="Tesseract language(s), e.g. 'eng' or 'eng+deu'")
+    p_index.add_argument("--workers", type=int, default=None,
+                         help="extraction worker processes (default: auto; 1 = serial)")
     p_index.set_defaults(func=_cmd_index)
 
     p_search = sub.add_parser("search", help="search the index (FTS5 syntax)")

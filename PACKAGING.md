@@ -17,12 +17,15 @@ You need Python 3.11+ with the runtime and build dependencies installed:
 python -m venv .venv
 .venv\Scripts\activate                 # Windows; source .venv/bin/activate on POSIX
 pip install -r requirements.txt -r requirements-build.txt
+# Optional — bundle Ask mode into the frozen build (llama-cpp-python):
+pip install -r requirements-llm.txt
 ```
 
 Then build:
 
 ```powershell
 pwsh packaging/build.ps1               # or: pwsh packaging/build.ps1 -Clean
+pwsh packaging/build.ps1 -WithLlm      # install requirements-llm.txt, then build
 ```
 
 or invoke PyInstaller directly:
@@ -140,10 +143,11 @@ Ask mode still uses FTS5 for retrieval — the LLM only expands the question int
 search terms and summarizes retrieved page excerpts with `[filename p.N]`
 citations. Answers are generated locally on `127.0.0.1`; nothing leaves the machine.
 
-> `llama-cpp-python` is intentionally **not** bundled in the default PyInstaller
-> build. Operators who need Ask install it in their build venv before packaging,
-> or run from source with `requirements-llm.txt`. The frozen app degrades
-> gracefully when the dependency or model is absent.
+> `llama-cpp-python` is **not** bundled unless you install `requirements-llm.txt`
+> in the build venv before packaging (`pip install …` or `build.ps1 -WithLlm`).
+> The spec auto-detects it and ships `llama.dll` with the bundle. You still
+> need a GGUF model in `models/` on the target machine. Without the dependency
+> or model, the frozen app degrades gracefully — keyword search is unaffected.
 
 ## Air-gapped dependency install
 

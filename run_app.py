@@ -8,7 +8,13 @@ __main__ quirks). From source you can run it directly:
 which is equivalent to `python -m app.launcher`.
 """
 
+import multiprocessing
+
 from app.launcher import main
 
 if __name__ == "__main__":
+    # Required before any process pool is created in a frozen (PyInstaller)
+    # build: child processes re-exec this script, and freeze_support() makes
+    # them act as workers instead of relaunching the whole app.
+    multiprocessing.freeze_support()
     main()
