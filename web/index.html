@@ -115,6 +115,11 @@
            box-shadow: 0 12px 40px rgba(0,0,0,.3); overflow: hidden; }
   .modal h2 { font-size: 14px; margin: 0; padding: 14px 16px;
               border-bottom: 1px solid var(--line); }
+  .modal .gorow { display: flex; gap: 6px; padding: 10px 16px;
+                  border-bottom: 1px solid var(--line); }
+  .modal .gorow input { flex: 1; padding: 6px 9px; border: 1px solid var(--line);
+                        border-radius: 7px; font-size: 12px; }
+  .modal .gorow button { padding: 6px 12px; }
   .modal .path { padding: 8px 16px; font-size: 12px; color: var(--muted);
                  background: #f6f8fb; border-bottom: 1px solid var(--line);
                  word-break: break-all; }
@@ -249,6 +254,11 @@
 <div class="overlay" id="browseOverlay">
   <div class="modal">
     <h2>Choose a folder to index</h2>
+    <div class="gorow">
+      <input type="text" id="browseGoInput" spellcheck="false"
+             placeholder="paste a path (e.g. \\server\share\folder) and press Enter">
+      <button id="browseGoBtn">Go</button>
+    </div>
     <div class="path" id="browsePath">…</div>
     <div class="dirlist" id="dirlist"></div>
     <label id="importOpts" style="display:none; padding: 8px 16px; font-size: 12px;
@@ -943,14 +953,22 @@ let browseSelectedFile = "";   // selected .db path (import mode only)
 
 async function browseTo(path) {
   const isImport = browsePurpose === "import";
-  let data;
+  let res, data;
   try {
     const url = "/api/browse?path=" + encodeURIComponent(path) +
                 (isImport ? "&files=db" : "");
-    data = await (await fetch(url)).json();
+    res = await fetch(url);
+    data = await res.json();
   } catch { return; }
+  if (!res.ok) {
+    // Bad/unreachable path (e.g. a network share that's offline or denied) —
+    // keep the current listing and explain, rather than blanking the modal.
+    $("browseNote").textContent = (data && data.detail) || "can't open that path";
+    return;
+  }
   browseCurrent = data.path;
   browseSelectedFile = "";
+  $("browseGoInput").value = data.path;   // address-bar reflects where we are
   $("browsePath").textContent = data.path || "This PC (drives)";
   if (isImport) {
     $("browseNote").textContent = data.path
@@ -1030,6 +1048,13 @@ function openBrowse(purpose) {
   browseTo(start);
 }
 function closeBrowse() { $("browseOverlay").classList.remove("on"); }
+
+// Navigate to a pasted/typed path — the way to reach network shares (UNC paths
+// like \\server\share) that don't show up under the drive-letter roots.
+function browseGo() {
+  const p = $("browseGoInput").value.trim();
+  if (p) browseTo(p);
+}
 
 async function doImport() {
   if (!browseSelectedFile) return;
@@ -1182,6 +1207,10 @@ $("indexBtn").addEventListener("click", doIndex);
 $("folder").addEventListener("keydown", (e) => { if (e.key === "Enter") doIndex(); });
 $("browseBtn").addEventListener("click", () => openBrowse("folder"));
 $("storeBrowseBtn").addEventListener("click", () => openBrowse("storage"));
+$("browseGoBtn").addEventListener("click", browseGo);
+$("browseGoInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); browseGo(); }
+});
 $("browseCancel").addEventListener("click", closeBrowse);
 $("browseUse").addEventListener("click", () => {
   $(browsePurpose === "storage" ? "storeLoc" : "folder").value = browseCurrent;
