@@ -17,6 +17,14 @@
            padding: 10px 16px; display: flex; gap: 16px; align-items: center; }
   header h1 { font-size: 15px; margin: 0; font-weight: 650; }
   header .stats { color: var(--muted); font-size: 12px; }
+  .index-pick { display: flex; gap: 4px; align-items: center; }
+  .index-pick select { padding: 5px 8px; border: 1px solid var(--line);
+                       border-radius: 7px; background: #fff; max-width: 360px;
+                       font-size: 12px; color: var(--ink); }
+  .index-pick select:disabled { color: var(--muted); }
+  button.ghost { padding: 5px 9px; color: var(--muted); }
+  button.ghost:hover:not(:disabled) { color: #b91c1c; border-color: #f0c0c0;
+                                      background: #fff5f5; }
   .index-bar { margin-left: auto; display: flex; gap: 6px; align-items: center; }
   input, select, button { font: inherit; }
   input[type=text] { padding: 7px 10px; border: 1px solid var(--line);
@@ -152,6 +160,10 @@
 <header>
   <h1>Offline PDF Search</h1>
   <span class="stats" id="stats">…</span>
+  <div class="index-pick" id="indexPick">
+    <select id="indexSel" title="Active index — search reads from this folder"></select>
+    <button id="removeIndexBtn" class="ghost" title="Remove this saved index (your files are kept)">✕</button>
+  </div>
   <div class="index-bar">
     <input type="text" id="folder" placeholder="folder to index…" size="44">
     <button id="browseBtn">Browse…</button>
@@ -265,6 +277,75 @@ async function refreshStats() {
       `${s.documents} docs · ${s.pages} pages` +
       (s.ocr_pending ? ` · ${s.ocr_pending} OCR pending` : "");
   } catch { $("stats").textContent = ""; }
+}
+
+// ---- Per-folder indexes ----
+async function loadIndexes() {
+  let data;
+  try { data = await (await fetch("/api/indexes")).json(); }
+  catch { return; }
+  const sel = $("indexSel");
+  sel.innerHTML = "";
+  if (!data.indexes.length) {
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = "(no indexes yet — index a folder)";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    $("removeIndexBtn").disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  $("removeIndexBtn").disabled = false;
+  for (const e of data.indexes) {
+    const opt = document.createElement("option");
+    opt.value = e.id;
+    opt.textContent = `${e.folder}  ·  ${e.documents} doc${e.documents === 1 ? "" : "s"}`;
+    if (e.id === data.active) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+// Reset the preview pane (used when the active index changes underneath it).
+function clearViewer() {
+  if (activeEl) { activeEl.classList.remove("active"); activeEl = null; }
+  viewerDocId = null;
+  const frame = $("viewer");
+  frame.src = "about:blank";
+  frame.style.display = "none";
+  $("textviewer").style.display = "none";
+  $("viewerHead").style.display = "none";
+  $("placeholder").style.display = "flex";
+}
+
+async function switchIndex(id) {
+  if (!id) return;
+  try {
+    const res = await fetch("/api/indexes/active", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    if (!res.ok) return;
+  } catch { return; }
+  clearViewer();
+  await refreshStats();
+  if (mode === "search") runSearch();
+}
+
+async function removeActiveIndex() {
+  const id = $("indexSel").value;
+  if (!id) return;
+  const label = $("indexSel").selectedOptions[0]?.textContent || "this index";
+  if (!confirm(`Remove the saved index for:\n${label}\n\n` +
+               `This deletes the index database only — your files are not touched.`)) {
+    return;
+  }
+  try {
+    await fetch("/api/indexes/" + encodeURIComponent(id), { method: "DELETE" });
+  } catch { return; }
+  clearViewer();
+  await loadIndexes();
+  await refreshStats();
+  if (mode === "search") runSearch();
 }
 
 function debounce(fn, ms) {
@@ -759,6 +840,7 @@ async function pollStatus(jobId, btnOld) {
       $("meta").appendChild(link);
     }
   }
+  await loadIndexes();   // the folder just indexed is now the active index
   await refreshStats();
   if (mode === "search") runSearch();
   finishIndex(btnOld);
@@ -965,9 +1047,12 @@ $("browseBtn").addEventListener("click", openBrowse);
 $("browseCancel").addEventListener("click", closeBrowse);
 $("browseUse").addEventListener("click", () => { $("folder").value = browseCurrent; closeBrowse(); });
 $("issuesClose").addEventListener("click", closeIssues);
+$("indexSel").addEventListener("change", () => switchIndex($("indexSel").value));
+$("removeIndexBtn").addEventListener("click", removeActiveIndex);
 for (const id of ["browseOverlay", "issuesOverlay"]) {
   $(id).addEventListener("click", (e) => { if (e.target.id === id) e.target.classList.remove("on"); });
 }
+loadIndexes();
 refreshStats();
 </script>
 </body>

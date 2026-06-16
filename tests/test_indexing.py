@@ -420,6 +420,62 @@ def test_multiprocessing_real(r: Results) -> None:
     r.check("_resolve_workers honours explicit 1", indexer._resolve_workers(100, 1) == 1)
 
 
+def test_per_folder_registry(tmp: Path, r: Results) -> None:
+    print("\n[9] per-folder indexes never overwrite each other (registry)")
+    from app import registry
+
+    # Redirect the registry's storage into a temp data dir for this test.
+    data_dir = tmp / "regdata"
+    data_dir.mkdir()
+    orig = paths.data_root
+    paths.data_root = lambda: data_dir  # type: ignore[assignment]
+    try:
+        ca = tmp / "rc_a"; ca.mkdir()
+        cb = tmp / "rc_b"; cb.mkdir()
+        make_native_pdf(ca / "a.pdf", ["alpha REGTOKA only here"])
+        make_native_pdf(cb / "b.pdf", ["bravo REGTOKB only here"])
+
+        ea = registry.resolve_for_folder(str(ca))
+        index_into(registry.db_path(ea), ca, max_workers=1)
+        eb = registry.resolve_for_folder(str(cb))   # indexing B must not touch A
+        index_into(registry.db_path(eb), cb, max_workers=1)
+
+        r.check("each folder gets a distinct database",
+                registry.db_path(ea) != registry.db_path(eb)
+                and registry.db_path(ea).exists() and registry.db_path(eb).exists())
+        r.check("folder A index keeps its own document",
+                fts_finds(registry.db_path(ea), "REGTOKA") == {"a.pdf"})
+        r.check("indexing B did NOT wipe A",
+                not fts_finds(registry.db_path(ea), "REGTOKB"))
+        r.check("folder B index keeps its own document",
+                fts_finds(registry.db_path(eb), "REGTOKB") == {"b.pdf"})
+
+        snap = registry.snapshot()
+        r.check("registry lists both folders", len(snap["indexes"]) == 2,
+                f"got {len(snap['indexes'])}")
+        r.check("most-recently-indexed folder is active", snap["active"] == eb["id"])
+
+        # Re-indexing the same folder reuses its database (no duplicate entry).
+        ea2 = registry.resolve_for_folder(str(ca))
+        r.check("re-resolving a folder reuses its index",
+                ea2["id"] == ea["id"] and ea2["db"] == ea["db"])
+        r.check("no duplicate registry entry on re-index",
+                len(registry.snapshot()["indexes"]) == 2)
+
+        registry.set_active(eb["id"])
+        r.check("set_active switches the active index",
+                registry.get_active()["id"] == eb["id"])
+
+        r.check("remove() reports success", registry.remove(ea["id"]))
+        r.check("removed database file is deleted", not registry.db_path(ea).exists())
+        r.check("registry shrinks after removal",
+                len(registry.snapshot()["indexes"]) == 1)
+        r.check("active stays valid after removing a non-active index",
+                registry.get_active()["id"] == eb["id"])
+    finally:
+        paths.data_root = orig  # type: ignore[assignment]
+
+
 def main() -> int:
     r = Results()
     with tempfile.TemporaryDirectory(prefix="ods_test_") as td:
@@ -435,6 +491,7 @@ def main() -> int:
         test_external_exclusions(tmp, r)
         test_serial_fallback(tmp, corpus, facts, r)
         test_stress(tmp, r)
+        test_per_folder_registry(tmp, r)
     test_multiprocessing_real(r)
     print(f"\n{'='*48}\n  {r.passed} passed, {r.failed} failed\n{'='*48}")
     return 1 if r.failed else 0

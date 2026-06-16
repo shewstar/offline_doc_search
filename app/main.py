@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ask, db, indexer, ocr, paths, search
+from . import ask, db, indexer, ocr, paths, registry, search
 
 WEB_DIR = paths.WEB_DIR
 
@@ -37,10 +37,30 @@ _HL_CLOSE = "\x03"
 app = FastAPI(title="Offline PDF Search")
 
 
+def _active_path() -> Path:
+    """Path of the active index's DB, or an empty placeholder when none exists.
+
+    Connecting to the placeholder yields a valid, empty schema, so stats/search
+    return zeros/no rows instead of erroring when nothing has been indexed yet.
+    """
+    return registry.active_db_path() or (registry.indexes_dir() / "_empty.db")
+
+
 def _conn():
-    conn = db.connect()
+    conn = db.connect(_active_path())
     db.init_schema(conn)
     return conn
+
+
+def _public_index(entry: dict) -> dict:
+    """Registry entry trimmed to what the UI needs (no internal db filename)."""
+    return {
+        "id": entry["id"],
+        "folder": entry["folder"],
+        "documents": entry["documents"],
+        "pages": entry["pages"],
+        "last_indexed_at": entry["last_indexed_at"],
+    }
 
 
 def _snippet_html(raw: str) -> str:
@@ -293,7 +313,7 @@ _ask_lock = threading.Lock()
 
 
 def _ask_worker(job_id: str, question: str, folder: str | None, method: str | None) -> None:
-    conn = db.connect()
+    conn = db.connect(_active_path())
     db.init_schema(conn)
     try:
         result = ask.ask(conn, question, folder=folder, method=method)
@@ -384,9 +404,10 @@ def _set_job(job_id: str, **fields) -> None:
 
 
 def _index_worker(job_id: str, folder: Path, cfg: indexer.OcrConfig,
-                  max_workers: int | None) -> None:
-    # Own connection: SQLite objects can't cross threads.
-    conn = db.connect()
+                  max_workers: int | None, db_path: Path, index_id: str) -> None:
+    # Own connection: SQLite objects can't cross threads. Each folder has its
+    # own database, so indexing one never disturbs another.
+    conn = db.connect(db_path)
     db.init_schema(conn)
     started = time.perf_counter()
 
@@ -419,6 +440,7 @@ def _index_worker(job_id: str, folder: Path, cfg: indexer.OcrConfig,
     try:
         indexer.index_folder(conn, folder, ocr_config=cfg,
                               max_workers=max_workers, on_progress=on_progress)
+        registry.update_counts(index_id, conn)
         _set_job(job_id, state="done", phase="done",
                  elapsed_s=round(time.perf_counter() - started, 1), eta_s=0)
     except Exception as exc:  # noqa: BLE001
@@ -443,6 +465,11 @@ def api_index(req: IndexRequest) -> dict:
     if req.ocr and not ocr.ocr_available():
         ocr_warning = "ocrmypdf/tesseract not on PATH; scanned files left un-OCR'd"
 
+    # Resolve (or create) this folder's own index and make it active. Indexing
+    # the same folder again reuses its database; a new folder gets a fresh one.
+    entry = registry.resolve_for_folder(str(root))
+    db_path = registry.db_path(entry)
+
     job_id = uuid.uuid4().hex[:12]
     with _jobs_lock:
         _jobs[job_id] = {"state": "running", "phase": "starting", "error": None,
@@ -453,9 +480,45 @@ def api_index(req: IndexRequest) -> dict:
     cfg = indexer.OcrConfig(enabled=req.ocr, language=req.ocr_lang)
     # None => auto-size to CPU count; 1 => serial extraction.
     max_workers = None if req.parallel else 1
-    threading.Thread(target=_index_worker, args=(job_id, root, cfg, max_workers),
+    threading.Thread(target=_index_worker,
+                     args=(job_id, root, cfg, max_workers, db_path, entry["id"]),
                      daemon=True).start()
-    return {"job_id": job_id, "ocr_warning": ocr_warning}
+    return {"job_id": job_id, "ocr_warning": ocr_warning,
+            "index": _public_index(entry)}
+
+
+# --- Index management (one database per indexed folder) -----------------------
+
+class ActiveIndexRequest(BaseModel):
+    id: str
+
+
+@app.get("/api/indexes")
+def api_indexes() -> dict:
+    """List every indexed folder and which one is active."""
+    snap = registry.snapshot()
+    return {"active": snap["active"],
+            "indexes": [_public_index(e) for e in snap["indexes"]]}
+
+
+@app.post("/api/indexes/active")
+def api_set_active_index(req: ActiveIndexRequest) -> dict:
+    """Switch which index search/stats/Ask read from."""
+    entry = registry.set_active(req.id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="unknown index")
+    return {"active": req.id, "index": _public_index(entry)}
+
+
+@app.delete("/api/indexes/{index_id}")
+def api_remove_index(index_id: str) -> dict:
+    """Delete a saved index (its database), leaving the folder's files untouched."""
+    with _jobs_lock:
+        if any(j["state"] == "running" for j in _jobs.values()):
+            raise HTTPException(status_code=409, detail="an index job is running")
+    if not registry.remove(index_id):
+        raise HTTPException(status_code=404, detail="unknown index")
+    return {"active": registry.snapshot()["active"]}
 
 
 @app.get("/api/index/status")
