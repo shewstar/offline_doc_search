@@ -170,8 +170,11 @@
     <input type="file" id="importFile" accept=".db" style="display:none">
   </div>
   <div class="index-bar">
-    <input type="text" id="folder" placeholder="folder to index…" size="44">
+    <input type="text" id="folder" placeholder="folder to index…" size="36">
     <button id="browseBtn">Browse…</button>
+    <input type="text" id="storeLoc" placeholder="storage device (optional)" size="20"
+           title="Where to store this index. Leave blank for the local data folder. Point at an encrypted/approved device to keep export-controlled index data on that device.">
+    <button id="storeBrowseBtn" title="Choose a storage device/folder for this index">💾</button>
     <label style="font-size:12px;color:var(--muted)">
       <input type="checkbox" id="ocr"> OCR
     </label>
@@ -285,12 +288,15 @@ async function refreshStats() {
 }
 
 // ---- Per-folder indexes ----
+let activeIndexInfo = null;   // the active entry {id, folder, location, available, …}
+
 async function loadIndexes() {
   let data;
   try { data = await (await fetch("/api/indexes")).json(); }
   catch { return; }
   const sel = $("indexSel");
   sel.innerHTML = "";
+  activeIndexInfo = null;
   if (!data.indexes.length) {
     const opt = document.createElement("option");
     opt.value = ""; opt.textContent = "(no indexes yet — index a folder)";
@@ -302,14 +308,32 @@ async function loadIndexes() {
   }
   sel.disabled = false;
   $("removeIndexBtn").disabled = false;
-  $("exportIndexBtn").disabled = false;
   for (const e of data.indexes) {
     const opt = document.createElement("option");
     opt.value = e.id;
-    opt.textContent = `${e.folder}  ·  ${e.documents} doc${e.documents === 1 ? "" : "s"}`;
-    if (e.id === data.active) opt.selected = true;
+    let label = `${e.folder}  ·  ${e.documents} doc${e.documents === 1 ? "" : "s"}`;
+    if (e.location) label += e.available ? `  · 💾 ${e.location}`
+                                         : `  · ⚠ ${e.location} (not connected)`;
+    opt.textContent = label;
+    if (e.id === data.active) { opt.selected = true; activeIndexInfo = e; }
     sel.appendChild(opt);
   }
+  // Can't export an index whose device isn't connected.
+  $("exportIndexBtn").disabled = !(activeIndexInfo && activeIndexInfo.available);
+}
+
+// When the active index is on a disconnected device, explain it instead of
+// silently showing "no matches".
+function offlineNotice() {
+  if (activeIndexInfo && !activeIndexInfo.available) {
+    $("results").innerHTML =
+      `<div class="empty">This index is stored on a device that isn't connected:<br>` +
+      `<b></b><br><br>Reconnect it to search, or pick another index.</div>`;
+    $("results").querySelector("b").textContent = activeIndexInfo.location;
+    $("meta").textContent = "storage device not connected";
+    return true;
+  }
+  return false;
 }
 
 // Reset the preview pane (used when the active index changes underneath it).
@@ -505,6 +529,7 @@ function renderAnswer(text, isCount) {
 }
 
 async function runSearch() {
+  if (offlineNotice()) return;
   const q = $("q").value.trim();
   const params = new URLSearchParams({ q });
   if ($("fFolder").value.trim()) params.set("folder", $("fFolder").value.trim());
@@ -894,6 +919,7 @@ function finishIndex(btnOld) {
 async function doIndex() {
   const folder = $("folder").value.trim();
   if (!folder) return;
+  const location = $("storeLoc").value.trim();
   const btnOld = $("indexBtn").textContent;
   $("indexBtn").disabled = true; $("indexBtn").textContent = "Indexing…";
   $("barfill").style.width = "0%";
@@ -903,7 +929,8 @@ async function doIndex() {
     const res = await fetch("/api/index", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ folder, ocr: $("ocr").checked,
-                             parallel: $("parallel").checked }),
+                             parallel: $("parallel").checked,
+                             location: location || null }),
     });
     const d = await res.json();
     if (!res.ok) {
@@ -957,9 +984,20 @@ async function browseTo(path) {
   }
 }
 
-function openBrowse() {
+// Which input the folder picker fills: "folder" (to index) or "storage" (device).
+let browseTarget = "folder";
+
+function openBrowse(target) {
+  browseTarget = target || "folder";
+  const startInput = browseTarget === "storage" ? "storeLoc" : "folder";
+  const h2 = browseTarget === "storage"
+    ? "Choose a storage device/folder for this index"
+    : "Choose a folder to index";
+  document.querySelector("#browseOverlay h2").textContent = h2;
+  $("browseUse").textContent = browseTarget === "storage"
+    ? "Store index here" : "Use this folder";
   $("browseOverlay").classList.add("on");
-  browseTo($("folder").value.trim());
+  browseTo($(startInput).value.trim());
 }
 function closeBrowse() { $("browseOverlay").classList.remove("on"); }
 
@@ -1081,9 +1119,13 @@ $("askBtn").addEventListener("click", runAsk);
 $("askQ").addEventListener("keydown", (e) => { if (e.key === "Enter") runAsk(); });
 $("indexBtn").addEventListener("click", doIndex);
 $("folder").addEventListener("keydown", (e) => { if (e.key === "Enter") doIndex(); });
-$("browseBtn").addEventListener("click", openBrowse);
+$("browseBtn").addEventListener("click", () => openBrowse("folder"));
+$("storeBrowseBtn").addEventListener("click", () => openBrowse("storage"));
 $("browseCancel").addEventListener("click", closeBrowse);
-$("browseUse").addEventListener("click", () => { $("folder").value = browseCurrent; closeBrowse(); });
+$("browseUse").addEventListener("click", () => {
+  $(browseTarget === "storage" ? "storeLoc" : "folder").value = browseCurrent;
+  closeBrowse();
+});
 $("issuesClose").addEventListener("click", closeIssues);
 $("indexSel").addEventListener("change", () => switchIndex($("indexSel").value));
 $("exportIndexBtn").addEventListener("click", exportActiveIndex);

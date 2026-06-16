@@ -476,6 +476,56 @@ def test_per_folder_registry(tmp: Path, r: Results) -> None:
         paths.data_root = orig  # type: ignore[assignment]
 
 
+def test_index_storage_location(tmp: Path, r: Results) -> None:
+    print("\n[10] per-index storage location (export-safe device)")
+    from app import registry
+
+    data_dir = tmp / "locdata"; data_dir.mkdir()
+    orig = paths.data_root
+    paths.data_root = lambda: data_dir  # type: ignore[assignment]
+    try:
+        device = tmp / "SafeDevice"; device.mkdir()   # stand-in for an external drive
+        corpus = tmp / "loc_src"; corpus.mkdir()
+        make_native_pdf(corpus / "c.pdf", ["controlled LOCTOKEN data"])
+
+        entry = registry.resolve_for_folder(str(corpus), location=str(device))
+        r.check("entry records the storage location",
+                entry.get("location") == str(device.resolve()))
+        dbp = registry.db_path(entry)
+        r.check("db path is on the chosen device", dbp.parent == device.resolve(),
+                f"got {dbp}")
+
+        index_into(dbp, corpus, max_workers=1)
+        r.check("database is written on the device", dbp.is_file())
+        r.check("nothing leaked into the local indexes dir",
+                not any(registry.indexes_dir().glob("*.db")))
+        r.check("index is searchable while device present",
+                fts_finds(dbp, "LOCTOKEN") == {"c.pdf"})
+        r.check("is_available True while device is mounted", registry.is_available(entry))
+
+        # Simulate ejecting the device: its directory disappears.
+        moved = tmp / "SafeDevice_ejected"
+        device.rename(moved)
+        r.check("is_available False once device is gone",
+                not registry.is_available(registry.get_active()))
+
+        # Re-mounting restores availability.
+        moved.rename(device)
+        r.check("is_available True again after remounting",
+                registry.is_available(registry.get_active()))
+
+        # A plain (no-location) index is always available.
+        local = tmp / "loc_local"; local.mkdir()
+        make_native_pdf(local / "d.pdf", ["local LOCTOKEN2"])
+        le = registry.resolve_for_folder(str(local))
+        r.check("default-location index has no location", le.get("location") is None)
+        r.check("default-location index always available", registry.is_available(le))
+        r.check("default-location db lives in local indexes dir",
+                registry.db_path(le).parent == registry.indexes_dir())
+    finally:
+        paths.data_root = orig  # type: ignore[assignment]
+
+
 def main() -> int:
     r = Results()
     with tempfile.TemporaryDirectory(prefix="ods_test_") as td:
@@ -492,6 +542,7 @@ def main() -> int:
         test_serial_fallback(tmp, corpus, facts, r)
         test_stress(tmp, r)
         test_per_folder_registry(tmp, r)
+        test_index_storage_location(tmp, r)
     test_multiprocessing_real(r)
     print(f"\n{'='*48}\n  {r.passed} passed, {r.failed} failed\n{'='*48}")
     return 1 if r.failed else 0

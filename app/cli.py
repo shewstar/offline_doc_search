@@ -41,12 +41,19 @@ def _cmd_index(args) -> int:
               "scanned files will be flagged 'required' but left un-OCR'd.",
               file=sys.stderr)
     # Index into this folder's own database (created on first use, reused on
-    # re-index) unless an explicit --db path overrides it.
+    # re-index) unless an explicit --db path overrides it. --store places a new
+    # index's database on a chosen device (e.g. an export-safe drive).
+    store = getattr(args, "store", None)
+    if store and not Path(store).is_dir():
+        print(f"error: storage location not found: {store}", file=sys.stderr)
+        return 2
     if args.db:
         db_path, index_id = Path(args.db), None
     else:
-        entry = registry.resolve_for_folder(str(root))
+        entry = registry.resolve_for_folder(str(root), location=store)
         db_path, index_id = registry.db_path(entry), entry["id"]
+        if entry.get("location"):
+            ocr_config.cache_dir = Path(entry["location"]) / "ocr-cache"
     conn = db.connect(db_path)
     db.init_schema(conn)
     t0 = time.perf_counter()
@@ -111,7 +118,11 @@ def _cmd_indexes(args) -> int:
         return 0
     for e in snap["indexes"]:
         mark = "*" if e["id"] == snap["active"] else " "
-        print(f"{mark} {e['id']}  {e['documents']:>6} docs  {e['folder']}")
+        where = ""
+        if e.get("location"):
+            where = (f"  [on {e['location']}]" if registry.is_available(e)
+                     else f"  [on {e['location']} — NOT CONNECTED]")
+        print(f"{mark} {e['id']}  {e['documents']:>6} docs  {e['folder']}{where}")
     print("\n(* = active; the index commands default to it)")
     return 0
 
@@ -133,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
                          help="Tesseract language(s), e.g. 'eng' or 'eng+deu'")
     p_index.add_argument("--workers", type=int, default=None,
                          help="extraction worker processes (default: auto; 1 = serial)")
+    p_index.add_argument("--store", default=None, metavar="DIR",
+                         help="store this index's database on DIR (e.g. an "
+                              "encrypted/export-safe device); default: local data dir")
     p_index.set_defaults(func=_cmd_index)
 
     p_search = sub.add_parser("search", help="search the index (FTS5 syntax)")

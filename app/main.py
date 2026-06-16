@@ -39,12 +39,17 @@ app = FastAPI(title="Offline PDF Search")
 
 
 def _active_path() -> Path:
-    """Path of the active index's DB, or an empty placeholder when none exists.
+    """Path of the active index's DB, or an empty placeholder.
 
-    Connecting to the placeholder yields a valid, empty schema, so stats/search
-    return zeros/no rows instead of erroring when nothing has been indexed yet.
+    Falls back to the placeholder when there is no active index *or* the active
+    index lives on a device that isn't currently mounted — so reads return
+    zeros/no rows instead of crashing. Connecting to the placeholder yields a
+    valid, empty schema. The UI surfaces the disconnected-device case separately.
     """
-    return registry.active_db_path() or (registry.indexes_dir() / "_empty.db")
+    entry = registry.get_active()
+    if entry is None or not registry.is_available(entry):
+        return registry.indexes_dir() / "_empty.db"
+    return registry.db_path(entry)
 
 
 def _conn():
@@ -61,6 +66,8 @@ def _public_index(entry: dict) -> dict:
         "documents": entry["documents"],
         "pages": entry["pages"],
         "last_indexed_at": entry["last_indexed_at"],
+        "location": entry.get("location"),
+        "available": registry.is_available(entry),
     }
 
 
@@ -390,6 +397,10 @@ class IndexRequest(BaseModel):
     # Parallel extraction helps on most machines but can be slower on some
     # (few cores, slow disk, AV scanning each spawned process). Off => serial.
     parallel: bool = True
+    # Optional directory (e.g. an encrypted/export-safe device) to store this
+    # index's database on. Blank => the local data folder. Only applied when the
+    # index is first created.
+    location: str | None = None
 
 
 # --- Background indexing jobs -------------------------------------------------
@@ -466,9 +477,19 @@ def api_index(req: IndexRequest) -> dict:
     if req.ocr and not ocr.ocr_available():
         ocr_warning = "ocrmypdf/tesseract not on PATH; scanned files left un-OCR'd"
 
+    # Optional export-safe storage device for this index's database. It must be
+    # mounted now (we're about to write to it).
+    location = (req.location or "").strip() or None
+    if location:
+        locp = Path(location).expanduser()
+        if not locp.is_dir():
+            raise HTTPException(status_code=400,
+                                detail=f"storage location not found: {locp}")
+        location = str(locp.resolve())
+
     # Resolve (or create) this folder's own index and make it active. Indexing
     # the same folder again reuses its database; a new folder gets a fresh one.
-    entry = registry.resolve_for_folder(str(root))
+    entry = registry.resolve_for_folder(str(root), location=location)
     db_path = registry.db_path(entry)
 
     job_id = uuid.uuid4().hex[:12]
@@ -479,6 +500,10 @@ def api_index(req: IndexRequest) -> dict:
                          "current_file": "", "elapsed_s": 0, "eta_s": None,
                          "failed": 0, "encrypted": 0}
     cfg = indexer.OcrConfig(enabled=req.ocr, language=req.ocr_lang)
+    # Keep OCR-derived content (full document text) on the same device as the
+    # index it belongs to, so a controlled index's data never lands locally.
+    if entry.get("location"):
+        cfg.cache_dir = Path(entry["location"]) / "ocr-cache"
     # None => auto-size to CPU count; 1 => serial extraction.
     max_workers = None if req.parallel else 1
     threading.Thread(target=_index_worker,
@@ -534,6 +559,9 @@ def api_export_index(index_id: str) -> FileResponse:
     entry = registry.find(index_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="unknown index")
+    if not registry.is_available(entry):
+        raise HTTPException(status_code=409,
+                            detail="this index's storage device is not connected")
     path = registry.db_path(entry)
     if not path.is_file():
         raise HTTPException(status_code=410, detail="index database is missing")
@@ -573,8 +601,20 @@ def _validate_index_db(path: Path) -> str | None:
 
 
 @app.post("/api/indexes/import")
-async def api_import_index(request: Request) -> dict:
-    """Add a shared index file (streamed as the raw request body) as a new index."""
+async def api_import_index(request: Request, location: str = Query("")) -> dict:
+    """Add a shared index file (streamed as the raw request body) as a new index.
+
+    Optional `location` stores the imported index on a device (e.g. an
+    export-safe drive) instead of the local data folder.
+    """
+    loc = location.strip() or None
+    if loc:
+        locp = Path(loc).expanduser()
+        if not locp.is_dir():
+            raise HTTPException(status_code=400,
+                                detail=f"storage location not found: {locp}")
+        loc = str(locp.resolve())
+
     tmp = registry.indexes_dir() / f"_import_{uuid.uuid4().hex}.tmp"
     try:
         with tmp.open("wb") as f:
@@ -583,7 +623,7 @@ async def api_import_index(request: Request) -> dict:
         if tmp.stat().st_size == 0:
             raise HTTPException(status_code=400, detail="no file received")
         folder = _validate_index_db(tmp)
-        entry = registry.import_db(tmp, folder)
+        entry = registry.import_db(tmp, folder, location=loc)
     finally:
         tmp.unlink(missing_ok=True)
 

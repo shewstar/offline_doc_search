@@ -67,9 +67,9 @@ def _rand_id() -> str:
     return os.urandom(4).hex()
 
 
-def _unique_db_name(slug: str, iid: str) -> str:
-    """A ``<slug>-<id>.db`` filename that doesn't already exist on disk."""
-    d = indexes_dir()
+def _unique_db_name(slug: str, iid: str, dest_dir: Path | None = None) -> str:
+    """A ``<slug>-<id>.db`` filename not already present in ``dest_dir``."""
+    d = dest_dir or indexes_dir()
     base = f"{slug}-{iid}"
     if not (d / f"{base}.db").exists():
         return f"{base}.db"
@@ -116,7 +116,24 @@ def get_active() -> dict | None:
 
 
 def db_path(entry: dict) -> Path:
-    return indexes_dir() / entry["db"]
+    """Absolute path of an entry's database file.
+
+    Defaults to ``indexes_dir()``; an entry with a ``location`` lives on that
+    directory instead (e.g. an external / export-safe device).
+    """
+    loc = entry.get("location")
+    base = Path(loc) if loc else indexes_dir()
+    return base / entry["db"]
+
+
+def is_available(entry: dict) -> bool:
+    """True if the entry's storage is reachable (its device/folder is mounted).
+
+    Default-location indexes are always available; a relocated index is only
+    available when its location directory currently exists.
+    """
+    loc = entry.get("location")
+    return True if not loc else Path(loc).is_dir()
 
 
 def active_db_path() -> Path | None:
@@ -144,14 +161,20 @@ def _find_in(data: dict, index_id: str | None) -> dict | None:
 
 # --- Public write API ---------------------------------------------------------
 
-def resolve_for_folder(folder: str) -> dict:
+def resolve_for_folder(folder: str, location: str | None = None) -> dict:
     """Return the registry entry for ``folder``, creating it if new.
 
     Either way the returned index becomes the active one. Same folder -> same
     entry (its database is reused); a new folder -> a fresh database.
+
+    ``location`` (a directory, e.g. an external/export-safe device) is recorded
+    only when the entry is *first* created — it fixes where that index's
+    database lives. Re-indexing the same folder keeps its original location; to
+    move an index, remove it and index it again.
     """
     iid = _index_id(folder)
     disp = str(Path(folder).resolve())
+    loc = str(Path(location).resolve()) if location else None
     with _lock:
         data = _load()
         entry = _find_in(data, iid)
@@ -160,6 +183,7 @@ def resolve_for_folder(folder: str) -> dict:
                 "id": iid,
                 "folder": disp,
                 "db": f"{_slug(folder)}-{iid}.db",
+                "location": loc,
                 "created_at": time.time(),
                 "last_indexed_at": None,
                 "documents": 0,
@@ -173,28 +197,32 @@ def resolve_for_folder(folder: str) -> dict:
         return entry
 
 
-def import_db(src: Path, folder: str | None) -> dict:
+def import_db(src: Path, folder: str | None, location: str | None = None) -> dict:
     """Register an externally produced index database as a new entry.
 
     ``src`` is a complete, checkpointed SQLite file (already validated by the
-    caller); it is copied into ``indexes_dir`` under a fresh filename. ``folder``
-    is the database's original source folder, used as the label — and, when it
-    doesn't collide with an existing index, as the id (so that re-indexing that
-    same folder locally later would update this entry in place). The imported
-    index becomes active.
+    caller); it is copied to ``location`` (if given, e.g. an export-safe device)
+    or into ``indexes_dir`` otherwise, under a fresh filename. ``folder`` is the
+    database's original source folder, used as the label — and, when it doesn't
+    collide with an existing index, as the id (so that re-indexing that same
+    folder locally later would update this entry in place). The imported index
+    becomes active.
     """
+    loc = str(Path(location).resolve()) if location else None
+    dest_dir = Path(loc) if loc else indexes_dir()
     with _lock:
         data = _load()
         iid = _index_id(folder) if folder else _rand_id()
         if _find_in(data, iid) is not None:
             iid = _rand_id()                  # never clobber an existing index
         slug = _slug(folder) if folder else "imported"
-        db_name = _unique_db_name(slug, iid)
-        shutil.copyfile(src, indexes_dir() / db_name)
+        db_name = _unique_db_name(slug, iid, dest_dir)
+        shutil.copyfile(src, dest_dir / db_name)
         entry = {
             "id": iid,
             "folder": folder or "(imported index)",
             "db": db_name,
+            "location": loc,
             "created_at": time.time(),
             "last_indexed_at": None,
             "documents": 0,
