@@ -11,12 +11,13 @@ from __future__ import annotations
 import html
 import mimetypes
 import re
+import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -519,6 +520,82 @@ def api_remove_index(index_id: str) -> dict:
     if not registry.remove(index_id):
         raise HTTPException(status_code=404, detail="unknown index")
     return {"active": registry.snapshot()["active"]}
+
+
+def _export_filename(entry: dict) -> str:
+    leaf = Path(entry["folder"]).name or "index"
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", leaf).strip("_") or "index"
+    return f"{safe}.db"
+
+
+@app.get("/api/indexes/{index_id}/export")
+def api_export_index(index_id: str) -> FileResponse:
+    """Download an index as a single self-contained .db file, to share."""
+    entry = registry.find(index_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="unknown index")
+    path = registry.db_path(entry)
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="index database is missing")
+    # Fold the WAL back into the .db so the downloaded file is complete.
+    conn = db.connect(path)
+    try:
+        db.checkpoint(conn)
+    finally:
+        conn.close()
+    return FileResponse(path, media_type="application/octet-stream",
+                        filename=_export_filename(entry))
+
+
+def _validate_index_db(path: Path) -> str | None:
+    """Confirm `path` is one of our index databases; return its source folder.
+
+    Raises 400 if the file isn't a usable Offline-Doc-Search index. The source
+    folder (from the `meta` table) may be None for indexes built before that
+    table existed.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+        if not {"documents", "pages", "pages_fts"}.issubset(names):
+            raise HTTPException(status_code=400,
+                                detail="file is not an Offline-Doc-Search index")
+        if "meta" in names:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='source_folder'").fetchone()
+            return row[0] if row else None
+        return None
+    except sqlite3.DatabaseError:
+        raise HTTPException(status_code=400, detail="not a valid index file")
+    finally:
+        conn.close()
+
+
+@app.post("/api/indexes/import")
+async def api_import_index(request: Request) -> dict:
+    """Add a shared index file (streamed as the raw request body) as a new index."""
+    tmp = registry.indexes_dir() / f"_import_{uuid.uuid4().hex}.tmp"
+    try:
+        with tmp.open("wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+        if tmp.stat().st_size == 0:
+            raise HTTPException(status_code=400, detail="no file received")
+        folder = _validate_index_db(tmp)
+        entry = registry.import_db(tmp, folder)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    # Cache the imported index's counts in the registry for the switcher label.
+    conn = db.connect(registry.db_path(entry))
+    try:
+        db.init_schema(conn)
+        registry.update_counts(entry["id"], conn)
+    finally:
+        conn.close()
+    return {"active": entry["id"],
+            "index": _public_index(registry.find(entry["id"]))}
 
 
 @app.get("/api/index/status")

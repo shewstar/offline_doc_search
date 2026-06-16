@@ -157,6 +157,10 @@ def index_folder(conn, root: Path, *, ocr_config: OcrConfig | None = None,
     stats = IndexStats()
     progress = Progress(stats=stats)
 
+    # Record the source folder so the database is self-describing if it's later
+    # copied/shared to another machine (see app.registry import).
+    db.set_meta(conn, "source_folder", str(root))
+
     def emit():
         if on_progress:
             on_progress(progress)

@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -60,6 +61,22 @@ def _slug(folder: str) -> str:
     name = p.name or p.drive.rstrip(":\\/") or "index"
     name = re.sub(r"[^0-9A-Za-z._-]+", "_", name).strip("_")
     return (name or "index")[:40]
+
+
+def _rand_id() -> str:
+    return os.urandom(4).hex()
+
+
+def _unique_db_name(slug: str, iid: str) -> str:
+    """A ``<slug>-<id>.db`` filename that doesn't already exist on disk."""
+    d = indexes_dir()
+    base = f"{slug}-{iid}"
+    if not (d / f"{base}.db").exists():
+        return f"{base}.db"
+    n = 2
+    while (d / f"{base}-{n}.db").exists():
+        n += 1
+    return f"{base}-{n}.db"
 
 
 def _load() -> dict:
@@ -151,6 +168,39 @@ def resolve_for_folder(folder: str) -> dict:
             data["indexes"].append(entry)
         else:
             entry["folder"] = disp  # refresh display path if it moved/relettered
+        data["active"] = iid
+        _save(data)
+        return entry
+
+
+def import_db(src: Path, folder: str | None) -> dict:
+    """Register an externally produced index database as a new entry.
+
+    ``src`` is a complete, checkpointed SQLite file (already validated by the
+    caller); it is copied into ``indexes_dir`` under a fresh filename. ``folder``
+    is the database's original source folder, used as the label — and, when it
+    doesn't collide with an existing index, as the id (so that re-indexing that
+    same folder locally later would update this entry in place). The imported
+    index becomes active.
+    """
+    with _lock:
+        data = _load()
+        iid = _index_id(folder) if folder else _rand_id()
+        if _find_in(data, iid) is not None:
+            iid = _rand_id()                  # never clobber an existing index
+        slug = _slug(folder) if folder else "imported"
+        db_name = _unique_db_name(slug, iid)
+        shutil.copyfile(src, indexes_dir() / db_name)
+        entry = {
+            "id": iid,
+            "folder": folder or "(imported index)",
+            "db": db_name,
+            "created_at": time.time(),
+            "last_indexed_at": None,
+            "documents": 0,
+            "pages": 0,
+        }
+        data["indexes"].append(entry)
         data["active"] = iid
         _save(data)
         return entry

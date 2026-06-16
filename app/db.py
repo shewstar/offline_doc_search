@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS index_events (
     event     TEXT NOT NULL,                       -- indexed/skipped/deleted/failed
     detail    TEXT
 );
+
+-- Self-describing key/value metadata (e.g. the source folder). Lets a database
+-- carry enough context to be shared/imported on another machine without the
+-- surrounding registry.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -111,6 +119,30 @@ def init_schema(conn: sqlite3.Connection) -> None:
 def optimize(conn: sqlite3.Connection) -> None:
     """Compact the FTS index — run after large reindex batches."""
     conn.execute("INSERT INTO pages_fts(pages_fts) VALUES('optimize')")
+    conn.commit()
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+    conn.commit()
+
+
+def get_meta(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def checkpoint(conn: sqlite3.Connection) -> None:
+    """Fold the WAL back into the main database file (TRUNCATE mode).
+
+    Run before copying/exporting a database so the single ``.db`` file is
+    complete and self-contained, without a trailing ``-wal`` sidecar.
+    """
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.commit()
 
 

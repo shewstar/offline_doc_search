@@ -23,8 +23,10 @@
                        font-size: 12px; color: var(--ink); }
   .index-pick select:disabled { color: var(--muted); }
   button.ghost { padding: 5px 9px; color: var(--muted); }
-  button.ghost:hover:not(:disabled) { color: #b91c1c; border-color: #f0c0c0;
-                                      background: #fff5f5; }
+  button.ghost:hover:not(:disabled) { color: var(--accent); border-color: #c7d9f5;
+                                      background: #eef3ff; }
+  #removeIndexBtn:hover:not(:disabled) { color: #b91c1c; border-color: #f0c0c0;
+                                         background: #fff5f5; }
   .index-bar { margin-left: auto; display: flex; gap: 6px; align-items: center; }
   input, select, button { font: inherit; }
   input[type=text] { padding: 7px 10px; border: 1px solid var(--line);
@@ -162,7 +164,10 @@
   <span class="stats" id="stats">…</span>
   <div class="index-pick" id="indexPick">
     <select id="indexSel" title="Active index — search reads from this folder"></select>
+    <button id="exportIndexBtn" class="ghost" title="Export this index to a file you can share">⬇</button>
+    <button id="importIndexBtn" class="ghost" title="Import an index file shared with you">⬆</button>
     <button id="removeIndexBtn" class="ghost" title="Remove this saved index (your files are kept)">✕</button>
+    <input type="file" id="importFile" accept=".db" style="display:none">
   </div>
   <div class="index-bar">
     <input type="text" id="folder" placeholder="folder to index…" size="44">
@@ -292,10 +297,12 @@ async function loadIndexes() {
     sel.appendChild(opt);
     sel.disabled = true;
     $("removeIndexBtn").disabled = true;
+    $("exportIndexBtn").disabled = true;
     return;
   }
   sel.disabled = false;
   $("removeIndexBtn").disabled = false;
+  $("exportIndexBtn").disabled = false;
   for (const e of data.indexes) {
     const opt = document.createElement("option");
     opt.value = e.id;
@@ -329,6 +336,37 @@ async function switchIndex(id) {
   clearViewer();
   await refreshStats();
   if (mode === "search") runSearch();
+}
+
+function exportActiveIndex() {
+  const id = $("indexSel").value;
+  if (!id) return;
+  // Browser download (server checkpoints the WAL into the .db first).
+  window.location.href = "/api/indexes/" + encodeURIComponent(id) + "/export";
+}
+
+async function importIndexFile(file) {
+  if (!file) return;
+  $("meta").textContent = `Importing ${file.name}…`;
+  try {
+    const res = await fetch("/api/indexes/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,   // streamed as the raw request body — no multipart needed
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("meta").textContent = "import failed: " + (d.detail || res.status);
+      return;
+    }
+    $("meta").textContent = "Imported index.";
+    clearViewer();
+    await loadIndexes();
+    await refreshStats();
+    if (mode === "search") runSearch();
+  } catch {
+    $("meta").textContent = "could not import index";
+  }
 }
 
 async function removeActiveIndex() {
@@ -1048,6 +1086,13 @@ $("browseCancel").addEventListener("click", closeBrowse);
 $("browseUse").addEventListener("click", () => { $("folder").value = browseCurrent; closeBrowse(); });
 $("issuesClose").addEventListener("click", closeIssues);
 $("indexSel").addEventListener("change", () => switchIndex($("indexSel").value));
+$("exportIndexBtn").addEventListener("click", exportActiveIndex);
+$("importIndexBtn").addEventListener("click", () => $("importFile").click());
+$("importFile").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";   // allow re-importing the same filename later
+  importIndexFile(file);
+});
 $("removeIndexBtn").addEventListener("click", removeActiveIndex);
 for (const id of ["browseOverlay", "issuesOverlay"]) {
   $(id).addEventListener("click", (e) => { if (e.target.id === id) e.target.classList.remove("on"); });
