@@ -522,6 +522,24 @@ def test_index_storage_location(tmp: Path, r: Results) -> None:
         r.check("default-location index always available", registry.is_available(le))
         r.check("default-location db lives in local indexes dir",
                 registry.db_path(le).parent == registry.indexes_dir())
+
+        # register_existing: reference a shared .db in place, never copy it.
+        shared_dir = tmp / "Shared"; shared_dir.mkdir()
+        shared_db = shared_dir / "team-index.db"
+        index_into(shared_db, corpus, max_workers=1)        # build the shared db
+        before = {p.name for p in shared_dir.iterdir()}
+        ref = registry.register_existing(shared_db, str(corpus))
+        r.check("referenced entry points at the original file in place",
+                registry.db_path(ref) == shared_db.resolve())
+        r.check("referenced flag is set", ref.get("referenced") is True)
+        r.check("reference does not copy the file elsewhere",
+                {p.name for p in shared_dir.iterdir()} == before
+                and not list(registry.indexes_dir().glob("*.db")))
+        r.check("referenced index is searchable in place",
+                fts_finds(registry.db_path(ref), "LOCTOKEN") == {"c.pdf"})
+        # Removing a reference must NOT delete the shared source file.
+        registry.remove(ref["id"])
+        r.check("removing a reference keeps the shared .db", shared_db.is_file())
     finally:
         paths.data_root = orig  # type: ignore[assignment]
 

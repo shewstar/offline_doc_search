@@ -20,7 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import ask, db, indexer, ocr, paths, registry, search
 
@@ -68,6 +68,7 @@ def _public_index(entry: dict) -> dict:
         "last_indexed_at": entry["last_indexed_at"],
         "location": entry.get("location"),
         "available": registry.is_available(entry),
+        "referenced": bool(entry.get("referenced")),
     }
 
 
@@ -627,7 +628,11 @@ async def api_import_index(request: Request, location: str = Query("")) -> dict:
     finally:
         tmp.unlink(missing_ok=True)
 
-    # Cache the imported index's counts in the registry for the switcher label.
+    return _finalize_added(entry)
+
+
+def _finalize_added(entry: dict) -> dict:
+    """Cache an added index's counts (for the switcher label) and return it."""
     conn = db.connect(registry.db_path(entry))
     try:
         db.init_schema(conn)
@@ -636,6 +641,30 @@ async def api_import_index(request: Request, location: str = Query("")) -> dict:
         conn.close()
     return {"active": entry["id"],
             "index": _public_index(registry.find(entry["id"]))}
+
+
+class RegisterIndexRequest(BaseModel):
+    # aliased to JSON "copy"; the attribute avoids shadowing BaseModel.copy().
+    model_config = {"populate_by_name": True}
+    path: str
+    # False (default) references the .db where it already is — nothing is
+    # copied, so a controlled index never lands in the local data folder. True
+    # copies it into local storage.
+    copy_local: bool = Field(False, alias="copy")
+
+
+@app.post("/api/indexes/register")
+def api_register_index(req: RegisterIndexRequest) -> dict:
+    """Add an existing index .db by path — referenced in place, or copied local."""
+    src = Path(req.path).expanduser()
+    if not src.is_file():
+        raise HTTPException(status_code=400, detail=f"file not found: {src}")
+    folder = _validate_index_db(src)
+    if req.copy_local:
+        entry = registry.import_db(src, folder)        # copy into local data dir
+    else:
+        entry = registry.register_existing(src, folder)  # reference where it is
+    return _finalize_added(entry)
 
 
 @app.get("/api/index/status")
@@ -696,12 +725,13 @@ def api_page(id: int, page: int = Query(1, ge=1)) -> dict:
 
 
 @app.get("/api/browse")
-def api_browse(path: str = "") -> dict:
+def api_browse(path: str = "", files: str = "") -> dict:
     """List subfolders for the folder picker.
 
     This app is single-user and localhost-bound, so browsing the local
     filesystem is the intended behaviour. Empty path lists drive roots (Windows)
-    or `/` (POSIX).
+    or `/` (POSIX). When ``files=db`` the response also lists ``*.db`` files in
+    the folder, so the picker can be used to choose an index to import.
     """
     import os
     import string
@@ -711,7 +741,8 @@ def api_browse(path: str = "") -> dict:
             roots = [f"{d}:\\" for d in string.ascii_uppercase
                      if Path(f"{d}:\\").exists()]
             return {"path": "", "parent": None,
-                    "dirs": [{"name": r, "path": r} for r in roots], "pdf_count": 0}
+                    "dirs": [{"name": r, "path": r} for r in roots],
+                    "files": [], "pdf_count": 0}
         path = "/"
 
     p = Path(path)
@@ -728,6 +759,15 @@ def api_browse(path: str = "") -> dict:
     except (PermissionError, OSError):
         dirs = []
 
+    db_files: list[dict] = []
+    if files == "db":
+        try:
+            db_files = [{"name": e.name, "path": str(e)}
+                        for e in sorted(p.glob("*.db"), key=lambda e: e.name.lower())
+                        if e.is_file()]
+        except (PermissionError, OSError):
+            db_files = []
+
     try:
         pdf_count = sum(1 for _ in p.glob("*.pdf"))
     except (PermissionError, OSError):
@@ -735,7 +775,8 @@ def api_browse(path: str = "") -> dict:
 
     # At a filesystem/drive root, "up" goes to the roots listing ("").
     parent = "" if p.parent == p else str(p.parent)
-    return {"path": str(p), "parent": parent, "dirs": dirs, "pdf_count": pdf_count}
+    return {"path": str(p), "parent": parent, "dirs": dirs,
+            "files": db_files, "pdf_count": pdf_count}
 
 
 @app.get("/api/issues")

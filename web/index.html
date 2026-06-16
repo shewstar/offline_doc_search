@@ -122,6 +122,7 @@
   .direntry { padding: 9px 16px; cursor: pointer; display: flex; gap: 8px;
               align-items: center; border-bottom: 1px solid #f0f2f5; }
   .direntry:hover { background: #eef3ff; }
+  .direntry.dbfile.sel { background: #e0eaff; font-weight: 600; }
   .direntry .ic { color: var(--muted); }
   .modal .foot { padding: 12px 16px; display: flex; gap: 8px; align-items: center;
                  border-top: 1px solid var(--line); }
@@ -167,14 +168,13 @@
     <button id="exportIndexBtn" class="ghost" title="Export this index to a file you can share">⬆</button>
     <button id="importIndexBtn" class="ghost" title="Import an index file shared with you">⬇</button>
     <button id="removeIndexBtn" class="ghost" title="Remove this saved index (your files are kept)">✕</button>
-    <input type="file" id="importFile" accept=".db" style="display:none">
   </div>
   <div class="index-bar">
     <input type="text" id="folder" placeholder="folder to index…" size="36">
     <button id="browseBtn">Browse…</button>
-    <input type="text" id="storeLoc" placeholder="storage device (optional)" size="20"
+    <input type="text" id="storeLoc" placeholder="index db storage location" size="22"
            title="Where to store this index. Leave blank for the local data folder. Point at an encrypted/approved device to keep export-controlled index data on that device.">
-    <button id="storeBrowseBtn" title="Choose a storage device/folder for this index">💾</button>
+    <button id="storeBrowseBtn" title="Choose a storage device/folder for this index">📂</button>
     <label style="font-size:12px;color:var(--muted)">
       <input type="checkbox" id="ocr"> OCR
     </label>
@@ -251,10 +251,23 @@
     <h2>Choose a folder to index</h2>
     <div class="path" id="browsePath">…</div>
     <div class="dirlist" id="dirlist"></div>
+    <label id="importOpts" style="display:none; padding: 8px 16px; font-size: 12px;
+           color: var(--muted); border-top: 1px solid var(--line); gap: 14px;
+           align-items: center;">
+      <span style="display:flex; gap:14px; align-items:center;">
+        <label style="display:flex; gap:5px; align-items:center; cursor:pointer;">
+          <input type="radio" name="importMode" value="ref" checked>
+          Leave the db where it is</label>
+        <label style="display:flex; gap:5px; align-items:center; cursor:pointer;">
+          <input type="radio" name="importMode" value="copy">
+          Copy into local storage</label>
+      </span>
+    </label>
     <div class="foot">
       <span class="note" id="browseNote"></span>
       <button id="browseCancel">Cancel</button>
       <button class="primary" id="browseUse">Use this folder</button>
+      <button class="primary" id="browseImport" style="display:none" disabled>Import</button>
     </div>
   </div>
 </div>
@@ -369,36 +382,15 @@ function exportActiveIndex() {
   window.location.href = "/api/indexes/" + encodeURIComponent(id) + "/export";
 }
 
-async function importIndexFile(file) {
-  if (!file) return;
-  $("meta").textContent = `Importing ${file.name}…`;
-  try {
-    const res = await fetch("/api/indexes/import", {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: file,   // streamed as the raw request body — no multipart needed
-    });
-    const d = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      $("meta").textContent = "import failed: " + (d.detail || res.status);
-      return;
-    }
-    $("meta").textContent = "Imported index.";
-    clearViewer();
-    await loadIndexes();
-    await refreshStats();
-    if (mode === "search") runSearch();
-  } catch {
-    $("meta").textContent = "could not import index";
-  }
-}
-
 async function removeActiveIndex() {
   const id = $("indexSel").value;
   if (!id) return;
   const label = $("indexSel").selectedOptions[0]?.textContent || "this index";
-  if (!confirm(`Remove the saved index for:\n${label}\n\n` +
-               `This deletes the index database only — your files are not touched.`)) {
+  const referenced = activeIndexInfo && activeIndexInfo.referenced;
+  const detail = referenced
+    ? "This removes the reference only — the shared .db file and your documents are kept."
+    : "This deletes the index database only — your documents are not touched.";
+  if (!confirm(`Remove the saved index for:\n${label}\n\n${detail}`)) {
     return;
   }
   try {
@@ -945,20 +937,31 @@ async function doIndex() {
   }
 }
 
-// ---- Folder picker ----
-let browseCurrent = "";
+// ---- Folder / file picker ----
+let browseCurrent = "";        // current directory
+let browseSelectedFile = "";   // selected .db path (import mode only)
 
 async function browseTo(path) {
+  const isImport = browsePurpose === "import";
   let data;
   try {
-    data = await (await fetch("/api/browse?path=" + encodeURIComponent(path))).json();
+    const url = "/api/browse?path=" + encodeURIComponent(path) +
+                (isImport ? "&files=db" : "");
+    data = await (await fetch(url)).json();
   } catch { return; }
   browseCurrent = data.path;
+  browseSelectedFile = "";
   $("browsePath").textContent = data.path || "This PC (drives)";
-  $("browseNote").textContent = data.path
-    ? `${data.pdf_count} PDF${data.pdf_count === 1 ? "" : "s"} directly in this folder`
-    : "Pick a drive to start";
-  $("browseUse").disabled = !data.path;
+  if (isImport) {
+    $("browseNote").textContent = data.path
+      ? "Select an index (.db) file to import" : "Pick a drive to start";
+    $("browseImport").disabled = true;
+  } else {
+    $("browseNote").textContent = data.path
+      ? `${data.pdf_count} PDF${data.pdf_count === 1 ? "" : "s"} directly in this folder`
+      : "Pick a drive to start";
+    $("browseUse").disabled = !data.path;
+  }
   const list = $("dirlist");
   list.innerHTML = "";
   if (data.parent !== null) {
@@ -976,30 +979,88 @@ async function browseTo(path) {
     row.onclick = () => browseTo(d.path);
     list.appendChild(row);
   }
-  if (!data.dirs.length && data.parent !== null) {
+  for (const f of (data.files || [])) {
+    const row = document.createElement("div");
+    row.className = "direntry dbfile";
+    row.innerHTML = `<span class="ic">🗄</span><span class="nm"></span>`;
+    row.querySelector(".nm").textContent = f.name;
+    row.onclick = () => {
+      browseSelectedFile = f.path;
+      $("browseImport").disabled = false;
+      for (const el of list.querySelectorAll(".dbfile")) el.classList.remove("sel");
+      row.classList.add("sel");
+    };
+    list.appendChild(row);
+  }
+  const hasFolders = data.dirs.length > 0;
+  const hasFiles = (data.files || []).length > 0;
+  if (!hasFolders && !hasFiles && data.parent !== null) {
     const none = document.createElement("div");
     none.className = "direntry"; none.style.color = "var(--muted)";
-    none.textContent = "(no subfolders)";
+    none.textContent = isImport ? "(no subfolders or .db files here)" : "(no subfolders)";
     list.appendChild(none);
   }
 }
 
-// Which input the folder picker fills: "folder" (to index) or "storage" (device).
-let browseTarget = "folder";
+// What the picker is for: "folder" (to index), "storage" (device), or
+// "import" (pick an existing .db to add).
+let browsePurpose = "folder";
 
-function openBrowse(target) {
-  browseTarget = target || "folder";
-  const startInput = browseTarget === "storage" ? "storeLoc" : "folder";
-  const h2 = browseTarget === "storage"
-    ? "Choose a storage device/folder for this index"
-    : "Choose a folder to index";
-  document.querySelector("#browseOverlay h2").textContent = h2;
-  $("browseUse").textContent = browseTarget === "storage"
-    ? "Store index here" : "Use this folder";
+function openBrowse(purpose) {
+  browsePurpose = purpose || "folder";
+  const isImport = browsePurpose === "import";
+  const isStorage = browsePurpose === "storage";
+  const titles = {
+    folder: "Choose a folder to index",
+    storage: "Choose a storage device/folder for this index",
+    import: "Import an index — choose a .db file",
+  };
+  document.querySelector("#browseOverlay h2").textContent = titles[browsePurpose];
+  // Footer: file-pick (import) shows the Import button + ref/copy options;
+  // directory-pick shows "Use this folder".
+  $("browseUse").style.display = isImport ? "none" : "";
+  $("browseImport").style.display = isImport ? "" : "none";
+  $("importOpts").style.display = isImport ? "flex" : "none";
+  if (!isImport) {
+    $("browseUse").textContent = isStorage ? "Store index here" : "Use this folder";
+  }
+  const startInput = isStorage ? "storeLoc" : "folder";
+  const start = isImport ? "" : $(startInput).value.trim();
   $("browseOverlay").classList.add("on");
-  browseTo($(startInput).value.trim());
+  browseTo(start);
 }
 function closeBrowse() { $("browseOverlay").classList.remove("on"); }
+
+async function doImport() {
+  if (!browseSelectedFile) return;
+  const copy = (document.querySelector('input[name="importMode"]:checked')?.value
+                === "copy");
+  $("browseImport").disabled = true;
+  $("meta").textContent = "Importing index…";
+  try {
+    const res = await fetch("/api/indexes/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: browseSelectedFile, copy }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("meta").textContent = "import failed: " + (d.detail || res.status);
+      $("browseImport").disabled = false;
+      return;
+    }
+    closeBrowse();
+    $("meta").textContent = copy
+      ? "Imported index (copied to local storage)."
+      : "Imported index (referenced in place).";
+    clearViewer();
+    await loadIndexes();
+    await refreshStats();
+    if (mode === "search") runSearch();
+  } catch {
+    $("meta").textContent = "could not import index";
+    $("browseImport").disabled = false;
+  }
+}
 
 // ---- Issues ----
 async function openIssues() {
@@ -1123,18 +1184,14 @@ $("browseBtn").addEventListener("click", () => openBrowse("folder"));
 $("storeBrowseBtn").addEventListener("click", () => openBrowse("storage"));
 $("browseCancel").addEventListener("click", closeBrowse);
 $("browseUse").addEventListener("click", () => {
-  $(browseTarget === "storage" ? "storeLoc" : "folder").value = browseCurrent;
+  $(browsePurpose === "storage" ? "storeLoc" : "folder").value = browseCurrent;
   closeBrowse();
 });
+$("browseImport").addEventListener("click", doImport);
 $("issuesClose").addEventListener("click", closeIssues);
 $("indexSel").addEventListener("change", () => switchIndex($("indexSel").value));
 $("exportIndexBtn").addEventListener("click", exportActiveIndex);
-$("importIndexBtn").addEventListener("click", () => $("importFile").click());
-$("importFile").addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  e.target.value = "";   // allow re-importing the same filename later
-  importIndexFile(file);
-});
+$("importIndexBtn").addEventListener("click", () => openBrowse("import"));
 $("removeIndexBtn").addEventListener("click", removeActiveIndex);
 for (const id of ["browseOverlay", "issuesOverlay"]) {
   $(id).addEventListener("click", (e) => { if (e.target.id === id) e.target.classList.remove("on"); });

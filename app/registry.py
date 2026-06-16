@@ -234,6 +234,38 @@ def import_db(src: Path, folder: str | None, location: str | None = None) -> dic
         return entry
 
 
+def register_existing(db_file: Path, folder: str | None) -> dict:
+    """Register an index database *in place* — without copying it.
+
+    The entry points straight at ``db_file`` wherever it already lives (e.g. a
+    shared/export-safe drive), so the data is never duplicated into the local
+    data folder. Implemented as a located entry whose location is the file's
+    parent directory; if that directory later disappears (device unmounted) the
+    index simply reports unavailable. The active index becomes this one.
+    """
+    db_file = Path(db_file).resolve()
+    with _lock:
+        data = _load()
+        iid = _index_id(folder) if folder else _rand_id()
+        if _find_in(data, iid) is not None:
+            iid = _rand_id()                  # never clobber an existing index
+        entry = {
+            "id": iid,
+            "folder": folder or "(imported index)",
+            "db": db_file.name,
+            "location": str(db_file.parent),
+            "referenced": True,   # points at an external file we must not delete
+            "created_at": time.time(),
+            "last_indexed_at": None,
+            "documents": 0,
+            "pages": 0,
+        }
+        data["indexes"].append(entry)
+        data["active"] = iid
+        _save(data)
+        return entry
+
+
 def set_active(index_id: str) -> dict | None:
     """Make ``index_id`` the active index. Returns the entry, or None if unknown."""
     with _lock:
@@ -261,10 +293,14 @@ def update_counts(index_id: str, conn) -> None:
 
 
 def remove(index_id: str) -> bool:
-    """Delete an index: its database files and its registry entry.
+    """Remove an index from the registry.
 
-    If the removed index was active, the active pointer falls back to the first
-    remaining index (or None). The folder's actual files are never touched.
+    For an owned index, its database files are deleted too. For a *referenced*
+    index (registered in place from an external/shared location) only the
+    registry entry is dropped — the original file is left untouched. If the
+    removed index was active, the active pointer falls back to the first
+    remaining index (or None). The indexed folder's actual files are never
+    touched in any case.
     """
     with _lock:
         data = _load()
@@ -275,10 +311,11 @@ def remove(index_id: str) -> bool:
         if data.get("active") == index_id:
             data["active"] = data["indexes"][0]["id"] if data["indexes"] else None
         _save(data)
-        base = indexes_dir() / entry["db"]
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                Path(str(base) + suffix).unlink()
-            except OSError:
-                pass  # absent or locked — best-effort cleanup
+        if not entry.get("referenced"):
+            base = db_path(entry)
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    Path(str(base) + suffix).unlink()
+                except OSError:
+                    pass  # absent or locked — best-effort cleanup
         return True
