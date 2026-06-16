@@ -1,8 +1,9 @@
 """Multi-format text extraction.
 
 PDFs go through PyMuPDF (see :mod:`app.extractor`). Text-bearing formats —
-``.txt``/``.md``/``.html``/``.docx``/``.epub`` — are read with the standard
-library only (no new dependency, keeping the bundle reviewable and offline).
+``.txt``/``.md``/``.html``/``.docx``/``.epub`` and common source-code
+extensions — are read with the standard library only (no new dependency,
+keeping the bundle reviewable and offline).
 
 Those formats have no inherent pagination, so their text is split into synthetic
 ``PAGE_TARGET``-sized "pages" on paragraph boundaries. That keeps the page-level
@@ -24,7 +25,14 @@ from . import extractor, paths
 from .extractor import PageText, normalize
 
 # Text-derived formats (everything except PDF).
-TEXT_EXTS = {".txt", ".text", ".md", ".markdown", ".html", ".htm", ".docx", ".epub"}
+CODE_EXTS = {
+    ".c", ".h", ".cpp", ".cxx", ".cc", ".hpp", ".hxx",
+    ".for", ".f", ".f90", ".f95",
+    ".css", ".js", ".ts", ".jsx", ".tsx",
+    ".py", ".java", ".rs", ".go", ".cs", ".vb",
+    ".sql", ".sh", ".bat", ".ps1",
+}
+TEXT_EXTS = {".txt", ".text", ".md", ".markdown", ".html", ".htm", ".docx", ".epub"} | CODE_EXTS
 SUPPORTED_EXTS = {".pdf"} | TEXT_EXTS
 
 # Approximate characters per synthetic page for non-paginated formats.
@@ -34,7 +42,16 @@ PAGE_TARGET = 3000
 # (see paths.exclusions_file) adds to these at runtime. Each entry is a glob
 # matched case-insensitively against a single path component, so e.g.
 # "PreviousVersions" skips that archive folder wherever it appears in the tree.
-DEFAULT_EXCLUDED_PATTERNS = ("PreviousVersions",)
+DEFAULT_EXCLUDED_PATTERNS = (
+    "PreviousVersions",
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "build",
+    "dist",
+    ".venv",
+    "venv",
+)
 
 
 def load_exclusion_patterns() -> list[str]:
@@ -146,7 +163,7 @@ def _read_text_document(path: Path) -> str:
         return _extract_epub(path)
     if ext in (".html", ".htm"):
         return html_to_text(_read_unicode(path))
-    return _read_unicode(path)  # .txt / .md / .markdown / .text
+    return _read_unicode(path)  # plain text, markdown, source code, etc.
 
 
 def _read_unicode(path: Path) -> str:

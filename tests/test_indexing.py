@@ -11,7 +11,7 @@ corpus in a temp dir, then exercises:
   * determinism across repeated parallel runs
   * correct stats for native / scanned / encrypted / corrupt / non-PDF files
   * incremental reindex (skip / modify / delete / add)
-  * per-format extraction + FTS searchability (pdf/txt/md/html/docx/epub)
+  * per-format extraction + FTS searchability (pdf/txt/md/html/docx/epub/c/for/css)
   * serial fallback when the process pool cannot be used
 
 Everything is guarded under __main__ so spawn-based worker processes re-import
@@ -141,16 +141,21 @@ def build_corpus(root: Path) -> dict:
         ("ch1.xhtml", "<h1>Chapter 1</h1><p>intro text</p>"),
         ("ch2.xhtml", "<p>Chapter two has ZTOKepub inside</p>"),
     ])
+    (root / "main.c").write_text("int main() { return 0; } // ZTOKc\n", encoding="utf-8")
+    (root / "legacy.for").write_text("      SUBROUTINE FOO\n      ZTOKfor\n", encoding="utf-8")
+    (root / "styles.css").write_text("body { color: red; } /* ZTOKcss */\n", encoding="utf-8")
     return {
         # path -> (expected ocr_status, expect indexed)
         "indexed_paths": {"a.pdf", "b.pdf", "scanned.pdf", "notes.txt", "readme.md",
-                          "page.html", "doc.docx", "book.epub"},
+                          "page.html", "doc.docx", "book.epub", "main.c", "legacy.for",
+                          "styles.css"},
         "encrypted_paths": {"locked.pdf"},
         "failed_paths": {"broken.pdf"},
         "tokens": {  # unique token -> filename it should be found in
             "ZTOKpdf": "a.pdf", "ZTOKpdfb": "b.pdf", "ZTOKtxt": "notes.txt",
             "ZTOKmd": "readme.md", "ZTOKhtml": "page.html", "ZTOKdocx": "doc.docx",
-            "ZTOKepub": "book.epub",
+            "ZTOKepub": "book.epub", "ZTOKc": "main.c", "ZTOKfor": "legacy.for",
+            "ZTOKcss": "styles.css",
         },
     }
 

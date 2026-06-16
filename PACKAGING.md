@@ -83,6 +83,11 @@ Archive              # any folder named Archive
 ~$*                  # Office lock files like ~$report.docx
 ```
 
+Built-in defaults also skip common dev/vendor folders (`.git`, `node_modules`,
+`__pycache__`, `build`, `dist`, `.venv`, `venv`) so indexing a source tree does
+not pull in dependencies or build artifacts. Add more patterns to
+`exclusions.txt` as needed.
+
 `PreviousVersions` is always excluded as a built-in default, so it works even
 without the file. Resolution lives in [`app/paths.py`](app/paths.py)
 (`exclusions_file`) and [`app/formats.py`](app/formats.py)
