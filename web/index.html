@@ -1257,9 +1257,11 @@ $("menuBtn").addEventListener("click", (e) => {
   e.stopPropagation();
   $("menuPanel").classList.toggle("on");
 });
-// Close the menu when clicking outside it (but not when interacting inside).
+// Close the menu when clicking outside it — but keep it open while using
+// browse/import modals opened from the menu (they live outside .menu-wrap).
 document.addEventListener("click", (e) => {
-  if (!e.target.closest(".menu-wrap")) $("menuPanel").classList.remove("on");
+  if (e.target.closest(".menu-wrap, #browseOverlay, #issuesOverlay")) return;
+  $("menuPanel").classList.remove("on");
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") $("menuPanel").classList.remove("on");
