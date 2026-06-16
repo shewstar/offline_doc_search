@@ -366,6 +366,9 @@ class IndexRequest(BaseModel):
     folder: str
     ocr: bool = False
     ocr_lang: str = "eng"
+    # Parallel extraction helps on most machines but can be slower on some
+    # (few cores, slow disk, AV scanning each spawned process). Off => serial.
+    parallel: bool = True
 
 
 # --- Background indexing jobs -------------------------------------------------
@@ -380,7 +383,8 @@ def _set_job(job_id: str, **fields) -> None:
         _jobs[job_id].update(fields)
 
 
-def _index_worker(job_id: str, folder: Path, cfg: indexer.OcrConfig) -> None:
+def _index_worker(job_id: str, folder: Path, cfg: indexer.OcrConfig,
+                  max_workers: int | None) -> None:
     # Own connection: SQLite objects can't cross threads.
     conn = db.connect()
     db.init_schema(conn)
@@ -413,7 +417,8 @@ def _index_worker(job_id: str, folder: Path, cfg: indexer.OcrConfig) -> None:
         )
 
     try:
-        indexer.index_folder(conn, folder, ocr_config=cfg, on_progress=on_progress)
+        indexer.index_folder(conn, folder, ocr_config=cfg,
+                              max_workers=max_workers, on_progress=on_progress)
         _set_job(job_id, state="done", phase="done",
                  elapsed_s=round(time.perf_counter() - started, 1), eta_s=0)
     except Exception as exc:  # noqa: BLE001
@@ -446,7 +451,9 @@ def api_index(req: IndexRequest) -> dict:
                          "current_file": "", "elapsed_s": 0, "eta_s": None,
                          "failed": 0, "encrypted": 0}
     cfg = indexer.OcrConfig(enabled=req.ocr, language=req.ocr_lang)
-    threading.Thread(target=_index_worker, args=(job_id, root, cfg),
+    # None => auto-size to CPU count; 1 => serial extraction.
+    max_workers = None if req.parallel else 1
+    threading.Thread(target=_index_worker, args=(job_id, root, cfg, max_workers),
                      daemon=True).start()
     return {"job_id": job_id, "ocr_warning": ocr_warning}
 

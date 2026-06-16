@@ -28,6 +28,16 @@ SUPPORTED_EXTS = {".pdf"} | TEXT_EXTS
 # Approximate characters per synthetic page for non-paginated formats.
 PAGE_TARGET = 3000
 
+# Directory names whose subtrees are skipped entirely during discovery. Matched
+# case-insensitively against each path component, so e.g. a "PreviousVersions"
+# archive folder is excluded wherever it appears in the tree.
+EXCLUDED_DIR_NAMES = {"previousversions"}
+
+
+def is_excluded(path: Path | str) -> bool:
+    """True if any directory component of `path` is in EXCLUDED_DIR_NAMES."""
+    return any(part.lower() in EXCLUDED_DIR_NAMES for part in Path(path).parts)
+
 
 def is_pdf(path: Path | str) -> bool:
     return Path(path).suffix.lower() == ".pdf"
@@ -42,6 +52,7 @@ def discover_documents(root: Path) -> list[Path]:
     return sorted(
         p for p in root.rglob("*")
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+        and not is_excluded(p)
     )
 
 

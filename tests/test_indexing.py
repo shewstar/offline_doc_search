@@ -304,6 +304,28 @@ def test_incremental(tmp: Path, r: Results) -> None:
     r.check("deleted file unsearchable", not fts_finds(dbp, "ZTOKgone"))
 
 
+def test_excluded_dirs(tmp: Path, r: Results) -> None:
+    print("\n[5b] PreviousVersions subtrees are excluded from indexing")
+    corpus = tmp / "excl"
+    (corpus / "PreviousVersions").mkdir(parents=True)
+    (corpus / "sub" / "PreviousVersions" / "deep").mkdir(parents=True)
+    (corpus / "current.txt").write_text("live ZTOKlive doc", encoding="utf-8")
+    (corpus / "PreviousVersions" / "old.txt").write_text("stale ZTOKold v1", encoding="utf-8")
+    (corpus / "sub" / "PreviousVersions" / "deep" / "older.md").write_text(
+        "stale ZTOKold2 v0", encoding="utf-8")
+
+    discovered = {p.name for p in formats.discover_documents(corpus)}
+    r.check("discovery skips excluded subtrees", discovered == {"current.txt"},
+            f"got {discovered}")
+
+    dbp = tmp / "excl.db"
+    stats = index_into(dbp, corpus, max_workers=1)
+    r.check("only the live file is indexed", stats.indexed == 1, stats.summary())
+    r.check("live file searchable", fts_finds(dbp, "ZTOKlive") == {"current.txt"})
+    r.check("top-level PreviousVersions not indexed", not fts_finds(dbp, "ZTOKold"))
+    r.check("nested PreviousVersions not indexed", not fts_finds(dbp, "ZTOKold2"))
+
+
 def test_serial_fallback(tmp: Path, corpus: Path, facts: dict, r: Results) -> None:
     print("\n[6] serial fallback when the process pool cannot start")
 
@@ -370,6 +392,7 @@ def main() -> int:
         test_searchability(tmp, facts, r)
         test_extract_units(tmp, r)
         test_incremental(tmp, r)
+        test_excluded_dirs(tmp, r)
         test_serial_fallback(tmp, corpus, facts, r)
         test_stress(tmp, r)
     test_multiprocessing_real(r)

@@ -158,6 +158,10 @@
     <label style="font-size:12px;color:var(--muted)">
       <input type="checkbox" id="ocr"> OCR
     </label>
+    <label style="font-size:12px;color:var(--muted)"
+           title="Use multiple processes to extract files in parallel. Faster on most machines; turn off if indexing feels slower here.">
+      <input type="checkbox" id="parallel" checked> Parallel
+    </label>
     <button id="indexBtn" class="primary">Index</button>
   </div>
 </header>
@@ -778,7 +782,8 @@ async function doIndex() {
   try {
     const res = await fetch("/api/index", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ folder, ocr: $("ocr").checked }),
+      body: JSON.stringify({ folder, ocr: $("ocr").checked,
+                             parallel: $("parallel").checked }),
     });
     const d = await res.json();
     if (!res.ok) {
