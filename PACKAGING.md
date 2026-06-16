@@ -48,6 +48,7 @@ dist/offline-doc-search/
   data/                      # created on first run, BESIDE the exe (writable):
     app.db                   #   SQLite index (WAL files alongside)
     ocr-cache/               #   OCR'd PDFs, keyed by content hash
+  exclusions.txt             # edit to skip paths from indexing (see below)
   bin/                       # OPTIONAL — drop OCR binaries here (see below)
   models/                    # OPTIONAL — drop a GGUF model here for Ask mode (see below)
 ```
@@ -60,6 +61,33 @@ from source (`python run_app.py`) and frozen.
 To deploy, copy the whole `dist/offline-doc-search/` folder to the target
 machine. Nothing else is required for **native-text PDFs** — no Python, no
 network. OCR for scanned PDFs needs the extra binaries below.
+
+## Excluding paths from indexing
+
+A plain-text `exclusions.txt` sits **beside the exe**. Edit it to control which
+paths the indexer skips, then re-run an index — **no rebuild required**. Changes
+take effect on the next index run. `build.ps1` drops a starter copy beside the
+executable (it won't overwrite one you've customized on an incremental rebuild).
+
+Format is gitignore-like: one pattern per line; blank lines and `#` comments are
+ignored. Each pattern is matched **case-insensitively against a single path
+component** (a folder or file name) anywhere in a document's path — a folder
+match skips its entire subtree, and excluded folders are pruned during the walk
+so a large archive costs nothing to skip. Glob wildcards `*`, `?`, and `[...]`
+are supported, and the whole name (including extension) must match.
+
+```text
+PreviousVersions     # any folder named PreviousVersions (also a built-in default)
+Archive              # any folder named Archive
+*_old.*              # files like report_old.pdf
+~$*                  # Office lock files like ~$report.docx
+```
+
+`PreviousVersions` is always excluded as a built-in default, so it works even
+without the file. Resolution lives in [`app/paths.py`](app/paths.py)
+(`exclusions_file`) and [`app/formats.py`](app/formats.py)
+(`load_exclusion_patterns`); the same file is honored for source runs (repo root)
+and frozen builds (beside the exe).
 
 ## OCR toolchain (optional, for scanned PDFs)
 

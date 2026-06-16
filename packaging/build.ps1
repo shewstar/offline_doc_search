@@ -41,6 +41,16 @@ try {
     pyinstaller --noconfirm $Spec
     if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller build failed (exit $LASTEXITCODE)." }
 
+    # Drop a starter exclusions.txt beside the .exe so operators can find and
+    # edit it without a rebuild. Never clobber an existing (possibly customized)
+    # one on an incremental build; a -Clean build starts fresh from the template.
+    $ExclSrc = Join-Path $PSScriptRoot "exclusions.txt"
+    $ExclDst = Join-Path $DistDir "exclusions.txt"
+    if ((Test-Path $ExclSrc) -and -not (Test-Path $ExclDst)) {
+        Copy-Item $ExclSrc $ExclDst
+        Write-Host "Placed starter exclusions.txt beside the executable."
+    }
+
     Write-Host ""
     Write-Host "Build complete:" -ForegroundColor Green
     Write-Host "  $DistDir"

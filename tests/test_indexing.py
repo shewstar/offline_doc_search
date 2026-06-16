@@ -30,7 +30,7 @@ from pathlib import Path
 # Make the repo root importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import db, formats, indexer, search  # noqa: E402
+from app import db, formats, indexer, paths, search  # noqa: E402
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -326,6 +326,45 @@ def test_excluded_dirs(tmp: Path, r: Results) -> None:
     r.check("nested PreviousVersions not indexed", not fts_finds(dbp, "ZTOKold2"))
 
 
+def test_external_exclusions(tmp: Path, r: Results) -> None:
+    print("\n[5c] external exclusions file adds patterns without a rebuild")
+    corpus = tmp / "extexcl"
+    (corpus / "Archive").mkdir(parents=True)
+    (corpus / "PreviousVersions").mkdir(parents=True)
+    (corpus / "keep.txt").write_text("live ZTOKkeep doc", encoding="utf-8")
+    (corpus / "report_old.md").write_text("stale ZTOKoldsuffix", encoding="utf-8")
+    (corpus / "Archive" / "a.txt").write_text("archived ZTOKarch", encoding="utf-8")
+    (corpus / "PreviousVersions" / "p.txt").write_text("prev ZTOKprev", encoding="utf-8")
+
+    excl = tmp / "exclusions.txt"
+    excl.write_text("# custom\nArchive\n*_old.*\n", encoding="utf-8")
+    orig = paths.exclusions_file
+    paths.exclusions_file = lambda: excl  # type: ignore[assignment]
+    try:
+        pats = formats.load_exclusion_patterns()
+        r.check("loader merges defaults + file",
+                "PreviousVersions" in pats and "Archive" in pats and "*_old.*" in pats,
+                f"got {pats}")
+        discovered = {p.name for p in formats.discover_documents(corpus)}
+        r.check("only non-excluded files discovered", discovered == {"keep.txt"},
+                f"got {discovered}")
+
+        dbp = tmp / "extexcl.db"
+        stats = index_into(dbp, corpus, max_workers=1)
+        r.check("external-exclusion index count=1", stats.indexed == 1, stats.summary())
+        r.check("kept file searchable", fts_finds(dbp, "ZTOKkeep") == {"keep.txt"})
+        r.check("named folder (Archive) excluded", not fts_finds(dbp, "ZTOKarch"))
+        r.check("glob (*_old) excluded", not fts_finds(dbp, "ZTOKoldsuffix"))
+        r.check("built-in default still applies", not fts_finds(dbp, "ZTOKprev"))
+    finally:
+        paths.exclusions_file = orig  # type: ignore[assignment]
+
+    # With the file gone, only the built-in default remains.
+    pats = formats.load_exclusion_patterns()
+    r.check("defaults-only when file absent", pats == list(formats.DEFAULT_EXCLUDED_PATTERNS),
+            f"got {pats}")
+
+
 def test_serial_fallback(tmp: Path, corpus: Path, facts: dict, r: Results) -> None:
     print("\n[6] serial fallback when the process pool cannot start")
 
@@ -393,6 +432,7 @@ def main() -> int:
         test_extract_units(tmp, r)
         test_incremental(tmp, r)
         test_excluded_dirs(tmp, r)
+        test_external_exclusions(tmp, r)
         test_serial_fallback(tmp, corpus, facts, r)
         test_stress(tmp, r)
     test_multiprocessing_real(r)

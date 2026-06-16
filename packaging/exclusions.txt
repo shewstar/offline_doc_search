@@ -1,0 +1,24 @@
+# exclusions.txt - paths to skip when indexing.
+#
+# This file sits beside offline-doc-search.exe. Edit it to change what the
+# indexer skips, then re-run an index — no rebuild required. Changes take
+# effect on the next index run.
+#
+# One pattern per line. Lines starting with '#' and blank lines are ignored.
+# Each pattern is matched (case-insensitively) against a single folder or file
+# name anywhere in a document's path. A folder match skips its whole subtree.
+# Glob wildcards are supported: *  ?  [...]
+#
+# Examples:
+#   PreviousVersions     skip any folder named "PreviousVersions"
+#   Archive              skip any folder named "Archive"
+#   *_old.*              skip files whose name ends in "_old" (e.g. report_old.pdf)
+#   ~$*                  skip Office lock files like ~$report.docx
+#
+# Patterns match a whole name, so the extension counts: "*_old" matches a file
+# literally named "_old", while "*_old.*" matches "report_old.pdf".
+#
+# Note: "PreviousVersions" is always excluded as a built-in default, so it does
+# not need to be listed here. Add your own patterns below.
+
+PreviousVersions

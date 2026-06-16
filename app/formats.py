@@ -12,13 +12,15 @@ ranking, and the viewer all treat a page the same regardless of source format.
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
 import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from . import extractor
+from . import extractor, paths
 from .extractor import PageText, normalize
 
 # Text-derived formats (everything except PDF).
@@ -28,15 +30,48 @@ SUPPORTED_EXTS = {".pdf"} | TEXT_EXTS
 # Approximate characters per synthetic page for non-paginated formats.
 PAGE_TARGET = 3000
 
-# Directory names whose subtrees are skipped entirely during discovery. Matched
-# case-insensitively against each path component, so e.g. a "PreviousVersions"
-# archive folder is excluded wherever it appears in the tree.
-EXCLUDED_DIR_NAMES = {"previousversions"}
+# Always-on exclusions, shipped with the app. The external exclusions file
+# (see paths.exclusions_file) adds to these at runtime. Each entry is a glob
+# matched case-insensitively against a single path component, so e.g.
+# "PreviousVersions" skips that archive folder wherever it appears in the tree.
+DEFAULT_EXCLUDED_PATTERNS = ("PreviousVersions",)
 
 
-def is_excluded(path: Path | str) -> bool:
-    """True if any directory component of `path` is in EXCLUDED_DIR_NAMES."""
-    return any(part.lower() in EXCLUDED_DIR_NAMES for part in Path(path).parts)
+def load_exclusion_patterns() -> list[str]:
+    """Built-in defaults plus any patterns from the external exclusions file.
+
+    The file lives beside the executable (one glob per line; ``#`` comments and
+    blank lines ignored), so a deployed build's exclusions can be changed by
+    editing it — no rebuild. A missing or unreadable file just yields the
+    defaults. Read fresh on each call so edits take effect on the next index run.
+    """
+    patterns = list(DEFAULT_EXCLUDED_PATTERNS)
+    try:
+        text = paths.exclusions_file().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return patterns  # absent/unreadable — defaults only
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            patterns.append(line)
+    return patterns
+
+
+def _matches_excluded(name: str, patterns: list[str]) -> bool:
+    """True if a single path component matches any pattern (case-insensitive)."""
+    lowered = name.lower()
+    return any(fnmatch.fnmatchcase(lowered, pat.lower()) for pat in patterns)
+
+
+def is_excluded(path: Path | str, patterns: list[str] | None = None) -> bool:
+    """True if any component of `path` matches an exclusion pattern.
+
+    `patterns` defaults to :func:`load_exclusion_patterns`; callers that scan
+    many paths should load once and pass it in to avoid re-reading the file.
+    """
+    if patterns is None:
+        patterns = load_exclusion_patterns()
+    return any(_matches_excluded(part, patterns) for part in Path(path).parts)
 
 
 def is_pdf(path: Path | str) -> bool:
@@ -48,12 +83,27 @@ def is_supported(path: Path | str) -> bool:
 
 
 def discover_documents(root: Path) -> list[Path]:
-    """Every indexable file under `root`, sorted for stable ordering."""
-    return sorted(
-        p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-        and not is_excluded(p)
-    )
+    """Every indexable file under `root`, sorted for stable ordering.
+
+    Excluded directories (see :func:`load_exclusion_patterns`) are pruned during
+    the walk, so their subtrees are never descended into — skipping a large
+    archive folder costs nothing instead of stat-ing every file inside it.
+    """
+    patterns = load_exclusion_patterns()
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune excluded dirs in place so os.walk won't recurse into them.
+        dirnames[:] = [d for d in dirnames if not _matches_excluded(d, patterns)]
+        base = Path(dirpath)
+        # Guard against an excluded component in `root` itself (os.walk can't
+        # prune the starting dir), then collect supported files.
+        if is_excluded(base, patterns):
+            continue
+        for name in filenames:
+            if Path(name).suffix.lower() in SUPPORTED_EXTS \
+                    and not _matches_excluded(name, patterns):
+                found.append(base / name)
+    return sorted(found)
 
 
 def page_count(path: Path | str) -> int:

@@ -15,5 +15,7 @@ venv/
 /wheelhouse/
 # Optional local LLM models (user drop-in GGUF files)
 /models/
+# Local index-exclusions file (the tracked template lives in packaging/)
+/exclusions.txt
 # Claude Code local settings (machine-specific permissions)
 .claude/settings.local.json

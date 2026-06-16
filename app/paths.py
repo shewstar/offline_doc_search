@@ -68,6 +68,18 @@ def bundled_bin_dir() -> Path:
     return _install_root() / "bin"
 
 
+def exclusions_file() -> Path:
+    """Optional external list of path-exclusion patterns, beside the install.
+
+    One glob per line (``#`` comments and blank lines ignored), matched
+    case-insensitively against each path component during indexing. Living
+    beside the executable means an operator can edit it on a *deployed* build to
+    change what gets skipped without rebuilding. Not created automatically; when
+    absent only the built-in defaults apply. See :func:`app.formats.load_exclusion_patterns`.
+    """
+    return _install_root() / "exclusions.txt"
+
+
 def models_dir() -> Path:
     """Optional `models/` folder beside the install for drop-in GGUF models.
 
