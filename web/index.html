@@ -27,7 +27,22 @@
                                       background: #eef3ff; }
   #removeIndexBtn:hover:not(:disabled) { color: #b91c1c; border-color: #f0c0c0;
                                          background: #fff5f5; }
-  .index-bar { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .menu-wrap { margin-left: auto; position: relative; }
+  .menu-btn { padding: 6px 12px; display: flex; gap: 6px; align-items: center; }
+  .menu-btn:hover { color: var(--accent); border-color: #c7d9f5; background: #eef3ff; }
+  .menu-panel { position: absolute; right: 0; top: calc(100% + 8px); z-index: 40;
+                width: 540px; max-width: 92vw; padding: 6px 0; background: var(--panel);
+                border: 1px solid var(--line); border-radius: 10px;
+                box-shadow: 0 12px 40px rgba(20,26,38,.18); display: none; }
+  .menu-panel.on { display: block; }
+  .menu-section { padding: 12px 16px; }
+  .menu-section + .menu-section { border-top: 1px solid var(--line); }
+  .menu-section h3 { margin: 0 0 10px; font-size: 11px; font-weight: 650;
+                     text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .menu-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .menu-row + .menu-row { margin-top: 8px; }
+  .menu-row input[type=text] { flex: 1; min-width: 0; }
+  .menu-row .grow { margin-left: auto; }
   input, select, button { font: inherit; }
   input[type=text] { padding: 7px 10px; border: 1px solid var(--line);
                      border-radius: 7px; background: #fff; }
@@ -170,24 +185,44 @@
   <span class="stats" id="stats">…</span>
   <div class="index-pick" id="indexPick">
     <select id="indexSel" title="Active index — search reads from this folder"></select>
-    <button id="exportIndexBtn" class="ghost" title="Export this index to a file you can share">⬆</button>
-    <button id="importIndexBtn" class="ghost" title="Import an index file shared with you">⬇</button>
-    <button id="removeIndexBtn" class="ghost" title="Remove this saved index (your files are kept)">✕</button>
   </div>
-  <div class="index-bar">
-    <input type="text" id="folder" placeholder="folder to index…" size="36">
-    <button id="browseBtn">Browse…</button>
-    <input type="text" id="storeLoc" placeholder="index db storage location (optional)" size="26"
-           title="Where to store this index. Leave blank for the local data folder. Point at an encrypted/approved device to keep export-controlled index data on that device.">
-    <button id="storeBrowseBtn" title="Choose a storage device/folder for this index">📂</button>
-    <label style="font-size:12px;color:var(--muted)">
-      <input type="checkbox" id="ocr"> OCR
-    </label>
-    <label style="font-size:12px;color:var(--muted)"
-           title="Use multiple processes to extract files in parallel. Faster on most machines; turn off if indexing feels slower here.">
-      <input type="checkbox" id="parallel" checked> Parallel
-    </label>
-    <button id="indexBtn" class="primary">Index</button>
+  <div class="menu-wrap">
+    <button id="menuBtn" class="menu-btn" title="Indexing and index files">⚙ Indexes ▾</button>
+    <div class="menu-panel" id="menuPanel">
+      <div class="menu-section">
+        <h3>Active index</h3>
+        <div class="menu-row">
+          <button id="exportIndexBtn" class="ghost"
+                  title="Export this index to a file you can share">⬆ Export</button>
+          <button id="importIndexBtn" class="ghost"
+                  title="Import an index file shared with you">⬇ Import</button>
+          <button id="removeIndexBtn" class="ghost"
+                  title="Remove this saved index (your files are kept)">✕ Remove</button>
+        </div>
+      </div>
+      <div class="menu-section">
+        <h3>Index a folder</h3>
+        <div class="menu-row">
+          <input type="text" id="folder" placeholder="folder to index…">
+          <button id="browseBtn">Browse…</button>
+        </div>
+        <div class="menu-row">
+          <input type="text" id="storeLoc" placeholder="index db storage location (optional)"
+                 title="Where to store this index. Leave blank for the local data folder. Point at an encrypted/approved device to keep export-controlled index data on that device.">
+          <button id="storeBrowseBtn" title="Choose a storage device/folder for this index">📂</button>
+        </div>
+        <div class="menu-row">
+          <label style="font-size:12px;color:var(--muted)">
+            <input type="checkbox" id="ocr"> OCR
+          </label>
+          <label style="font-size:12px;color:var(--muted)"
+                 title="Use multiple processes to extract files in parallel. Faster on most machines; turn off if indexing feels slower here.">
+            <input type="checkbox" id="parallel" checked> Parallel
+          </label>
+          <button id="indexBtn" class="primary grow">Index</button>
+        </div>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -1218,6 +1253,17 @@ $("browseUse").addEventListener("click", () => {
 });
 $("browseImport").addEventListener("click", doImport);
 $("issuesClose").addEventListener("click", closeIssues);
+$("menuBtn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("menuPanel").classList.toggle("on");
+});
+// Close the menu when clicking outside it (but not when interacting inside).
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".menu-wrap")) $("menuPanel").classList.remove("on");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("menuPanel").classList.remove("on");
+});
 $("indexSel").addEventListener("change", () => switchIndex($("indexSel").value));
 $("exportIndexBtn").addEventListener("click", exportActiveIndex);
 $("importIndexBtn").addEventListener("click", () => openBrowse("import"));
